@@ -47,13 +47,12 @@ def test_navigation_velocity_footprint_and_costmap_settings():
 
     obstacle_layer = local_costmap["obstacle_layer"]
     assert obstacle_layer["plugin"] == "nav2_costmap_2d::ObstacleLayer"
-    assert obstacle_layer["observation_sources"] == "chest_scan"
-    assert obstacle_layer["chest_scan"] == {
-        "topic": "/scan_nav",
-        "data_type": "LaserScan",
+    assert obstacle_layer["observation_sources"] == "chest_cloud"
+    assert obstacle_layer["chest_cloud"] == {
+        "topic": "/scan_nav/cloud",
+        "data_type": "PointCloud2",
         "marking": True,
         "clearing": True,
-        "inf_is_valid": True,
         "min_obstacle_height": -1.0,
         "max_obstacle_height": 2.0,
         "obstacle_min_range": 0.20,
@@ -80,7 +79,7 @@ def test_navigation_velocity_zmq_bridge_settings():
     }
 
 
-def test_navigation_converts_throttled_raw_lidar_to_laserscan():
+def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
 
     throttle = configuration["lidar_cloud_throttle"]["ros__parameters"]
@@ -89,24 +88,13 @@ def test_navigation_converts_throttled_raw_lidar_to_laserscan():
         "output_topic": "/scan_nav/cloud",
         "max_rate_hz": 5.0,
         "timestamp_offset_sec": 0.0,
-    }
-
-    converter = configuration["lidar_to_scan"]["ros__parameters"]
-    assert converter == {
         "target_frame": "base_link",
-        "transform_tolerance": 5.0,
+        "tf_timeout_sec": 0.05,
+        "voxel_size": 0.05,
         "min_height": -0.45,
         "max_height": 0.30,
-        "angle_min": -3.141592653589793,
-        "angle_max": 3.141592653589793,
-        "angle_increment": 0.008726646259971648,
-        "scan_time": 0.20,
-        "range_min": 0.20,
-        "range_max": 5.0,
-        "use_inf": True,
-        "inf_epsilon": 0.0,
-        "queue_size": 1,
     }
+    assert "lidar_to_scan" not in configuration
 
     launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
     assert 'package="x2_navigation"' in launch_source
@@ -114,10 +102,8 @@ def test_navigation_converts_throttled_raw_lidar_to_laserscan():
     assert '"lidar_timestamp_offset_sec"' in launch_source
     assert 'default_value="0.0"' in launch_source
     assert '"timestamp_offset_sec": ParameterValue(' in launch_source
-    assert 'package="pointcloud_to_laserscan"' in launch_source
-    assert 'executable="pointcloud_to_laserscan_node"' in launch_source
-    assert '"cloud_in", "/scan_nav/cloud"' in launch_source
-    assert '"scan", "/scan_nav"' in launch_source
+    assert 'package="pointcloud_to_laserscan"' not in launch_source
+    assert 'executable="pointcloud_to_laserscan_node"' not in launch_source
 
 
 def test_navigation_uses_navfn_pluginlib_identifier():
@@ -180,6 +166,7 @@ def test_rviz_uses_transient_local_qos_for_the_packaged_map():
     assert robot_display["Description Topic"]["Value"] == "/robot_description"
     assert robot_display["Description Topic"]["Durability Policy"] == "Transient Local"
 
-    scan_display = displays_by_name["Navigation Scan"]
-    assert scan_display["Topic"]["Value"] == "/scan_nav"
-    assert scan_display["Topic"]["Reliability Policy"] == "Best Effort"
+    cloud_display = displays_by_name["Navigation Cloud"]
+    assert cloud_display["Class"] == "rviz_default_plugins/PointCloud2"
+    assert cloud_display["Topic"]["Value"] == "/scan_nav/cloud"
+    assert cloud_display["Topic"]["Reliability Policy"] == "Best Effort"

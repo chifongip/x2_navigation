@@ -8,10 +8,23 @@ find_package(nav_msgs REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+
+add_library(point_cloud_voxel_filter STATIC src/point_cloud_voxel_filter.cpp)
+target_compile_features(point_cloud_voxel_filter PUBLIC cxx_std_17)
+target_compile_options(point_cloud_voxel_filter PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(point_cloud_voxel_filter PUBLIC include)
+ament_target_dependencies(point_cloud_voxel_filter
+  geometry_msgs
+  sensor_msgs
+  std_msgs
+  tf2
+  tf2_geometry_msgs
+)
 pkg_check_modules(ZMQ REQUIRED IMPORTED_TARGET libzmq)
 
 add_executable(fast_lio_odom_adapter src/fast_lio_odom_adapter.cpp)
@@ -43,9 +56,12 @@ add_executable(lidar_cloud_throttle src/lidar_cloud_throttle.cpp)
 target_compile_features(lidar_cloud_throttle PUBLIC cxx_std_17)
 target_compile_options(lidar_cloud_throttle PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(lidar_cloud_throttle PRIVATE include)
+target_link_libraries(lidar_cloud_throttle point_cloud_voxel_filter)
 ament_target_dependencies(lidar_cloud_throttle
   rclcpp
   sensor_msgs
+  tf2
+  tf2_ros
 )
 
 install(TARGETS
@@ -79,6 +95,17 @@ if(BUILD_TESTING)
   target_compile_options(test_velocity_command PRIVATE -Wall -Wextra -Wpedantic)
   target_include_directories(test_velocity_command PRIVATE include)
   ament_target_dependencies(test_velocity_command geometry_msgs)
+
+  ament_add_gtest(test_point_cloud_voxel_filter test/test_point_cloud_voxel_filter.cpp)
+  target_compile_options(test_point_cloud_voxel_filter PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(test_point_cloud_voxel_filter point_cloud_voxel_filter)
+  ament_target_dependencies(test_point_cloud_voxel_filter
+    geometry_msgs
+    sensor_msgs
+    std_msgs
+    tf2
+    tf2_geometry_msgs
+  )
 
   ament_add_pytest_test(test_navigation_config test/test_navigation_config.py)
   add_launch_test(test/test_fast_lio_odom_adapter.launch.py TIMEOUT 30)

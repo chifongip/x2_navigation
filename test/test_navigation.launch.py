@@ -1,4 +1,3 @@
-import math
 import struct
 import time
 import unittest
@@ -13,7 +12,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from lifecycle_msgs.srv import GetState
 from nav_msgs.msg import OccupancyGrid
-from sensor_msgs.msg import LaserScan, PointCloud2, PointField
+from sensor_msgs.msg import PointCloud2, PointField
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 
@@ -48,6 +47,7 @@ def generate_test_description():
         PythonLaunchDescriptionSource(str(package_path / "launch" / "navigation.launch.py")),
         launch_arguments={
             "rviz": "false",
+            "lidar_pointcloud_topic": "/test/lidar_pointcloud",
             "velocity_zmq_endpoint": "tcp://127.0.0.1:18561",
         }.items(),
     )
@@ -85,11 +85,11 @@ class TestNavigationLifecycle(unittest.TestCase):
             ),
         )
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.scan_messages = []
-        self.scan_subscription = self.node.create_subscription(
-            LaserScan,
-            "/scan_nav",
-            self.scan_messages.append,
+        self.navigation_cloud_messages = []
+        self.navigation_cloud_subscription = self.node.create_subscription(
+            PointCloud2,
+            "/scan_nav/cloud",
+            self.navigation_cloud_messages.append,
             sensor_qos,
         )
         self.local_costmap_messages = []
@@ -105,14 +105,14 @@ class TestNavigationLifecycle(unittest.TestCase):
         )
         self.cloud_publisher = self.node.create_publisher(
             PointCloud2,
-            "/aima/hal/sensor/lidar_chest_front/lidar_pointcloud",
+            "/test/lidar_pointcloud",
             sensor_qos,
         )
 
     def tearDown(self):
         self.node.destroy_publisher(self.cloud_publisher)
         self.node.destroy_subscription(self.local_costmap_subscription)
-        self.node.destroy_subscription(self.scan_subscription)
+        self.node.destroy_subscription(self.navigation_cloud_subscription)
         self.node.destroy_subscription(self.map_subscription)
         self.node.destroy_node()
 
@@ -157,11 +157,11 @@ class TestNavigationLifecycle(unittest.TestCase):
         self.assertEqual(map_message.info.height, 799)
         self.assertAlmostEqual(map_message.info.resolution, 0.05, places=6)
 
-    def test_raw_lidar_cloud_is_converted_to_navigation_scan(self):
+    def test_raw_lidar_cloud_is_filtered_for_navigation(self):
         cloud = PointCloud2()
         cloud.header.frame_id = "lidar_chest_front"
         cloud.height = 1
-        cloud.width = 2
+        cloud.width = 4
         cloud.fields = [
             PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
@@ -170,25 +170,44 @@ class TestNavigationLifecycle(unittest.TestCase):
         cloud.is_bigendian = False
         cloud.point_step = 12
         cloud.row_step = cloud.width * cloud.point_step
-        cloud.data = struct.pack("<ffffff", 1.0, 0.0, 0.0, 2.0, 0.0, 0.0)
+        cloud.data = struct.pack(
+            "<ffffffffffff",
+            1.01,
+            0.00,
+            0.00,
+            1.04,
+            0.02,
+            0.00,
+            1.08,
+            0.00,
+            0.00,
+            1.00,
+            0.00,
+            0.40,
+        )
         cloud.is_dense = True
         input_stamp = self.node.get_clock().now().to_msg()
         cloud.header.stamp = input_stamp
 
         deadline = time.monotonic() + 10.0
-        while not self.scan_messages and time.monotonic() < deadline:
+        while not self.navigation_cloud_messages and time.monotonic() < deadline:
             self.cloud_publisher.publish(cloud)
             rclpy.spin_once(self.node, timeout_sec=0.25)
 
-        self.assertTrue(self.scan_messages)
-        scan = self.scan_messages[-1]
-        self.assertEqual(scan.header.frame_id, "base_link")
-        self.assertTrue(any(math.isfinite(value) for value in scan.ranges))
+        self.assertTrue(self.navigation_cloud_messages)
+        navigation_cloud = self.navigation_cloud_messages[-1]
+        self.assertEqual(navigation_cloud.header.frame_id, "base_link")
+        self.assertEqual(navigation_cloud.width, 2)
+        self.assertEqual(navigation_cloud.point_step, 12)
+        self.assertEqual([field.name for field in navigation_cloud.fields], ["x", "y", "z"])
         input_nanoseconds = input_stamp.sec * 1_000_000_000 + input_stamp.nanosec
-        scan_nanoseconds = scan.header.stamp.sec * 1_000_000_000 + scan.header.stamp.nanosec
-        self.assertEqual(scan_nanoseconds, input_nanoseconds)
+        cloud_nanoseconds = (
+            navigation_cloud.header.stamp.sec * 1_000_000_000
+            + navigation_cloud.header.stamp.nanosec
+        )
+        self.assertEqual(cloud_nanoseconds, input_nanoseconds)
 
-    def test_navigation_scan_marks_the_local_costmap(self):
+    def test_navigation_cloud_marks_the_local_costmap(self):
         cloud = PointCloud2()
         cloud.header.frame_id = "lidar_chest_front"
         cloud.height = 1

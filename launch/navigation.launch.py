@@ -95,13 +95,13 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "lidar_pointcloud_topic",
                 default_value="/aima/hal/sensor/lidar_chest_front/lidar_pointcloud",
-                description="Raw chest LiDAR point cloud converted into /scan_nav.",
+                description="Raw chest LiDAR point cloud filtered into /scan_nav/cloud.",
             ),
             DeclareLaunchArgument(
                 "lidar_timestamp_offset_sec",
                 default_value="0.0",
                 description=(
-                    "Seconds added to raw-cloud stamps before conversion; use only "
+                    "Seconds added to raw-cloud stamps before filtering; use only "
                     "for a measured LiDAR-to-TF timing offset."
                 ),
             ),
@@ -162,17 +162,6 @@ def generate_launch_description():
                             lidar_timestamp_offset_sec, value_type=float
                         ),
                     },
-                ],
-            ),
-            Node(
-                package="pointcloud_to_laserscan",
-                executable="pointcloud_to_laserscan_node",
-                name="lidar_to_scan",
-                output="screen",
-                parameters=[configured_params],
-                remappings=[
-                    ("cloud_in", "/scan_nav/cloud"),
-                    ("scan", "/scan_nav"),
                 ],
             ),
             Node(
