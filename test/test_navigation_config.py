@@ -59,6 +59,7 @@ def test_navigation_velocity_footprint_and_costmap_settings():
         "obstacle_max_range": 5.0,
         "raytrace_min_range": 0.20,
         "raytrace_max_range": 5.5,
+        "observation_persistence": 1.0,
     }
 
     assert local_costmap["width"] == 6
@@ -86,13 +87,14 @@ def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     assert throttle == {
         "input_topic": "/aima/hal/sensor/lidar_chest_front/lidar_pointcloud",
         "output_topic": "/scan_nav/cloud",
-        "max_rate_hz": 5.0,
+        "max_rate_hz": 10.0,
         "timestamp_offset_sec": 0.0,
         "target_frame": "base_link",
         "tf_timeout_sec": 0.05,
         "voxel_size": 0.05,
         "min_height": -0.45,
         "max_height": 0.30,
+        "max_input_points": 40000,
     }
     assert "lidar_to_scan" not in configuration
 

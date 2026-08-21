@@ -65,7 +65,7 @@ The local costmap consumes dynamic obstacles through this bounded pipeline:
 
 ```
 /aima/hal/sensor/lidar_chest_front/lidar_pointcloud
-  -> lidar_cloud_throttle (5 Hz, depth one)
+  -> lidar_cloud_throttle (newest cloud every 100 ms)
   -> base_link transform, height crop, 0.05 m voxel downsampling
   -> /scan_nav/cloud (compact XYZ PointCloud2)
   -> local obstacle layer (marking and clearing)
@@ -73,13 +73,16 @@ The local costmap consumes dynamic obstacles through this bounded pipeline:
 
 The throttle uses the live `base_link <- lidar_chest_front` transform because
 the chest LiDAR axes are rotated. It retains points from -0.45 m to 0.30 m in
-the `base_link` frame and publishes one XYZ centroid per 0.05 m voxel. This
-removes the observed floor band without copying the raw LiDAR payload. The
-costmap applies the 0.20-5.0 m obstacle ranges. Tune the height limits and
-voxel size for the robot posture and environment; the navigation stack adds
-only one raw-cloud subscriber and keeps it at a bounded rate. The global
-costmap remains static-map only, and Nav2 does not consume FAST-LIO's
-registered clouds.
+the `base_link` frame and publishes one XYZ centroid per 0.05 m voxel. It
+processes the newest received cloud from a 10 Hz timer, so callback arrival
+phase does not cause avoidable rate-gate misses. Each output still requires a
+fresh input cloud and a timestamp-valid transform. A reusable allocator avoids
+per-frame voxel storage churn, and `max_input_points` bounds work to 40,000
+uniformly sampled raw points per output. The costmap applies the 0.20-5.0 m
+obstacle ranges. Tune the height limits, voxel size, and input bound for the
+robot posture and environment; the navigation stack adds only one raw-cloud
+subscriber and keeps it at a bounded rate. The global costmap remains
+static-map only, and Nav2 does not consume FAST-LIO's registered clouds.
 
 Point-cloud clearing raytraces only to retained returns. Unlike a LaserScan,
 it has no infinity returns to clear empty sectors out to maximum range.

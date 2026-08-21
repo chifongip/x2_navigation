@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory_resource>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -167,7 +168,22 @@ sensor_msgs::msg::PointCloud2 makeEmptyCloud(const std_msgs::msg::Header & heade
 
 }  // namespace
 
-std::optional<PointCloudVoxelFilterResult> filterPointCloudToVoxels(
+struct PointCloudVoxelFilterWorkspace::Impl
+{
+  std::pmr::unsynchronized_pool_resource memory_resource;
+  std::pmr::unordered_map<VoxelKey, std::size_t, VoxelKeyHash> voxel_indices{&memory_resource};
+  std::pmr::vector<VoxelAccumulator> voxels{&memory_resource};
+  bool initial_capacity_reserved{false};
+};
+
+PointCloudVoxelFilterWorkspace::PointCloudVoxelFilterWorkspace()
+: impl_(std::make_unique<Impl>())
+{
+}
+
+PointCloudVoxelFilterWorkspace::~PointCloudVoxelFilterWorkspace() = default;
+
+std::optional<PointCloudVoxelFilterResult> PointCloudVoxelFilterWorkspace::filter(
   const sensor_msgs::msg::PointCloud2 & input,
   const geometry_msgs::msg::TransformStamped & target_from_source,
   const std_msgs::msg::Header & output_header,
@@ -175,7 +191,8 @@ std::optional<PointCloudVoxelFilterResult> filterPointCloudToVoxels(
 {
   if (!std::isfinite(config.voxel_size) || config.voxel_size <= 0.0 ||
     !std::isfinite(config.min_height) || !std::isfinite(config.max_height) ||
-    config.min_height > config.max_height || !hasValidLayout(input))
+    config.min_height > config.max_height || config.max_input_points == 0U ||
+    !hasValidLayout(input))
   {
     return std::nullopt;
   }
@@ -185,49 +202,83 @@ std::optional<PointCloudVoxelFilterResult> filterPointCloudToVoxels(
     return std::nullopt;
   }
 
+  const auto input_point_count = static_cast<std::size_t>(input.width) * input.height;
+  if (input_point_count == 0U) {
+    PointCloudVoxelFilterResult result;
+    result.cloud = makeEmptyCloud(output_header);
+    result.input_point_count = 0U;
+    result.sampled_point_count = 0U;
+    result.retained_point_count = 0U;
+    return result;
+  }
+
   tf2::Transform transform;
   tf2::fromMsg(target_from_source.transform, transform);
 
-  std::unordered_map<VoxelKey, std::size_t, VoxelKeyHash> voxel_indices;
-  std::vector<VoxelAccumulator> voxels;
-  const auto input_point_count = static_cast<std::size_t>(input.width) * input.height;
-  const auto initial_voxel_capacity = std::min<std::size_t>(input_point_count, 65536U);
-  voxel_indices.reserve(initial_voxel_capacity);
-  voxels.reserve(initial_voxel_capacity);
+  const auto sampled_point_count = std::min(input_point_count, config.max_input_points);
+  const auto initial_voxel_capacity = std::min<std::size_t>(sampled_point_count, 16384U);
+  auto & voxel_indices = impl_->voxel_indices;
+  auto & voxels = impl_->voxels;
+  voxel_indices.clear();
+  voxels.clear();
+  if (!impl_->initial_capacity_reserved) {
+    voxel_indices.reserve(initial_voxel_capacity);
+    voxels.reserve(initial_voxel_capacity);
+    impl_->initial_capacity_reserved = true;
+  }
 
-  for (std::uint32_t row = 0U; row < input.height; ++row) {
-    const auto * row_data = input.data.data() + static_cast<std::size_t>(row) * input.row_step;
-    for (std::uint32_t column = 0U; column < input.width; ++column) {
-      const auto * point_data = row_data + static_cast<std::size_t>(column) * input.point_step;
-      const auto source_x = readFloat(point_data, field_offsets->x);
-      const auto source_y = readFloat(point_data, field_offsets->y);
-      const auto source_z = readFloat(point_data, field_offsets->z);
-      if (!std::isfinite(source_x) || !std::isfinite(source_y) || !std::isfinite(source_z)) {
-        continue;
+  std::size_t next_sample_index = sampled_point_count == 1U ?
+    (input_point_count - 1U) / 2U : 0U;
+  const auto sample_interval_count = sampled_point_count > 1U ? sampled_point_count - 1U : 1U;
+  const auto sample_span = input_point_count - 1U;
+  const auto base_sample_interval = sample_span / sample_interval_count;
+  const auto sample_interval_remainder = sample_span % sample_interval_count;
+  std::size_t sample_interval_error = 0U;
+  for (std::size_t samples_visited = 0U; samples_visited < sampled_point_count;
+    ++samples_visited)
+  {
+    const auto input_index = next_sample_index;
+    if (samples_visited + 1U < sampled_point_count) {
+      next_sample_index += base_sample_interval;
+      sample_interval_error += sample_interval_remainder;
+      if (sample_interval_error >= sample_interval_count) {
+        ++next_sample_index;
+        sample_interval_error -= sample_interval_count;
       }
-
-      const auto point = transform * tf2::Vector3(source_x, source_y, source_z);
-      if (!std::isfinite(point.x()) || !std::isfinite(point.y()) || !std::isfinite(point.z()) ||
-        point.z() < config.min_height || point.z() > config.max_height)
-      {
-        continue;
-      }
-
-      VoxelKey key{};
-      if (!makeVoxelKey(point, config.voxel_size, &key)) {
-        continue;
-      }
-
-      const auto [iterator, inserted] = voxel_indices.emplace(key, voxels.size());
-      if (inserted) {
-        voxels.push_back(VoxelAccumulator{});
-      }
-      auto & accumulator = voxels[iterator->second];
-      accumulator.x += point.x();
-      accumulator.y += point.y();
-      accumulator.z += point.z();
-      ++accumulator.count;
     }
+
+    const auto row = input_index / input.width;
+    const auto column = input_index % input.width;
+    const auto * point_data = input.data.data() + row * input.row_step +
+      column * input.point_step;
+    const auto source_x = readFloat(point_data, field_offsets->x);
+    const auto source_y = readFloat(point_data, field_offsets->y);
+    const auto source_z = readFloat(point_data, field_offsets->z);
+    if (!std::isfinite(source_x) || !std::isfinite(source_y) || !std::isfinite(source_z)) {
+      continue;
+    }
+
+    const auto point = transform * tf2::Vector3(source_x, source_y, source_z);
+    if (!std::isfinite(point.x()) || !std::isfinite(point.y()) || !std::isfinite(point.z()) ||
+      point.z() < config.min_height || point.z() > config.max_height)
+    {
+      continue;
+    }
+
+    VoxelKey key{};
+    if (!makeVoxelKey(point, config.voxel_size, &key)) {
+      continue;
+    }
+
+    const auto [iterator, inserted] = voxel_indices.emplace(key, voxels.size());
+    if (inserted) {
+      voxels.push_back(VoxelAccumulator{});
+    }
+    auto & accumulator = voxels[iterator->second];
+    accumulator.x += point.x();
+    accumulator.y += point.y();
+    accumulator.z += point.z();
+    ++accumulator.count;
   }
 
   if (voxels.size() > std::numeric_limits<std::uint32_t>::max() / (3U * sizeof(float))) {
@@ -237,6 +288,7 @@ std::optional<PointCloudVoxelFilterResult> filterPointCloudToVoxels(
   PointCloudVoxelFilterResult result;
   result.cloud = makeEmptyCloud(output_header);
   result.input_point_count = input_point_count;
+  result.sampled_point_count = sampled_point_count;
   result.retained_point_count = voxels.size();
   result.cloud.width = static_cast<std::uint32_t>(voxels.size());
   result.cloud.row_step = result.cloud.width * result.cloud.point_step;
@@ -255,6 +307,16 @@ std::optional<PointCloudVoxelFilterResult> filterPointCloudToVoxels(
   }
 
   return result;
+}
+
+std::optional<PointCloudVoxelFilterResult> filterPointCloudToVoxels(
+  const sensor_msgs::msg::PointCloud2 & input,
+  const geometry_msgs::msg::TransformStamped & target_from_source,
+  const std_msgs::msg::Header & output_header,
+  const PointCloudVoxelFilterConfig & config)
+{
+  PointCloudVoxelFilterWorkspace workspace;
+  return workspace.filter(input, target_from_source, output_header, config);
 }
 
 }  // namespace x2_navigation

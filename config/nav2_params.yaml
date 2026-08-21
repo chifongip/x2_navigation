@@ -18,13 +18,14 @@ lidar_cloud_throttle:
   ros__parameters:
     input_topic: /aima/hal/sensor/lidar_chest_front/lidar_pointcloud
     output_topic: /scan_nav/cloud
-    max_rate_hz: 5.0
+    max_rate_hz: 10.0
     timestamp_offset_sec: 0.0
     target_frame: base_link
     tf_timeout_sec: 0.05
     voxel_size: 0.05
     min_height: -0.45
     max_height: 0.30
+    max_input_points: 40000
 
 bt_navigator:
   ros__parameters:
@@ -131,6 +132,7 @@ local_costmap:
           obstacle_max_range: 5.0
           raytrace_min_range: 0.20
           raytrace_max_range: 5.5
+          observation_persistence: 1.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         inflation_radius: 0.55

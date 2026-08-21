@@ -72,10 +72,11 @@ TEST(PointCloudVoxelFilter, TransformsCropsAndDownsamplesToCompactXyz)
 
   const auto result = x2_navigation::filterPointCloudToVoxels(
     input, makeTransform(), output_header,
-    x2_navigation::PointCloudVoxelFilterConfig{0.05, -0.45, 0.30});
+    x2_navigation::PointCloudVoxelFilterConfig{0.05, -0.45, 0.30, 40000U});
 
   ASSERT_TRUE(result);
   EXPECT_EQ(result->input_point_count, 5U);
+  EXPECT_EQ(result->sampled_point_count, 5U);
   EXPECT_EQ(result->retained_point_count, 2U);
   EXPECT_EQ(result->cloud.header.frame_id, "base_link");
   EXPECT_EQ(result->cloud.header.stamp.sec, 42);
@@ -102,7 +103,7 @@ TEST(PointCloudVoxelFilter, RejectsCloudsWithoutFloat32XyzFields)
 
   const auto result = x2_navigation::filterPointCloudToVoxels(
     input, makeTransform(), std_msgs::msg::Header{},
-    x2_navigation::PointCloudVoxelFilterConfig{0.05, -0.45, 0.30});
+    x2_navigation::PointCloudVoxelFilterConfig{0.05, -0.45, 0.30, 40000U});
 
   EXPECT_FALSE(result);
 }
@@ -114,7 +115,86 @@ TEST(PointCloudVoxelFilter, RejectsMalformedCloudWithZeroPointStride)
 
   const auto result = x2_navigation::filterPointCloudToVoxels(
     input, makeTransform(), std_msgs::msg::Header{},
-    x2_navigation::PointCloudVoxelFilterConfig{0.05, -0.45, 0.30});
+    x2_navigation::PointCloudVoxelFilterConfig{0.05, -0.45, 0.30, 40000U});
 
   EXPECT_FALSE(result);
+}
+
+TEST(PointCloudVoxelFilter, BoundsInputWorkWithUniformSampling)
+{
+  const auto input = makeCloud({
+      0.00F, 0.00F, 0.00F,
+      0.10F, 0.00F, 0.00F,
+      0.20F, 0.00F, 0.00F,
+      0.30F, 0.00F, 0.00F,
+      0.40F, 0.00F, 0.00F,
+    });
+
+  const auto result = x2_navigation::filterPointCloudToVoxels(
+    input, makeTransform(), std_msgs::msg::Header{},
+    x2_navigation::PointCloudVoxelFilterConfig{0.05, -0.45, 0.30, 2U});
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result->input_point_count, 5U);
+  EXPECT_EQ(result->sampled_point_count, 2U);
+  EXPECT_EQ(result->retained_point_count, 2U);
+  EXPECT_NEAR(readOutputValue(result->cloud, 0U, 0U), 1.0F, 1e-6F);
+  EXPECT_NEAR(readOutputValue(result->cloud, 1U, 0U), 1.4F, 1e-6F);
+}
+
+TEST(PointCloudVoxelFilter, SamplesExactlyTheLimitJustAboveTheBoundary)
+{
+  const auto input = makeCloud({
+      0.00F, 0.00F, 0.00F,
+      0.10F, 0.00F, 0.00F,
+      0.20F, 0.00F, 0.00F,
+      0.30F, 0.00F, 0.00F,
+      0.40F, 0.00F, 0.00F,
+      0.50F, 0.00F, 0.00F,
+    });
+
+  const auto result = x2_navigation::filterPointCloudToVoxels(
+    input, makeTransform(), std_msgs::msg::Header{},
+    x2_navigation::PointCloudVoxelFilterConfig{0.05, -0.45, 0.30, 5U});
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result->input_point_count, 6U);
+  EXPECT_EQ(result->sampled_point_count, 5U);
+  EXPECT_EQ(result->retained_point_count, 5U);
+  EXPECT_NEAR(readOutputValue(result->cloud, 0U, 0U), 1.0F, 1e-6F);
+  EXPECT_NEAR(readOutputValue(result->cloud, 4U, 0U), 1.5F, 1e-6F);
+}
+
+TEST(PointCloudVoxelFilter, SamplesOrganizedCloudsWithPaddedRows)
+{
+  const auto source = makeCloud({
+      0.00F, 0.00F, 0.00F,
+      0.10F, 0.00F, 0.00F,
+      0.20F, 0.00F, 0.00F,
+      0.30F, 0.00F, 0.00F,
+      0.40F, 0.00F, 0.00F,
+      0.50F, 0.00F, 0.00F,
+    });
+  auto input = source;
+  input.width = 3U;
+  input.height = 2U;
+  input.row_step = input.width * input.point_step + 8U;
+  input.data.assign(static_cast<std::size_t>(input.height) * input.row_step, 0U);
+  for (std::size_t index = 0U; index < 6U; ++index) {
+    const auto row = index / input.width;
+    const auto column = index % input.width;
+    std::memcpy(
+      input.data.data() + row * input.row_step + column * input.point_step,
+      source.data.data() + index * source.point_step, source.point_step);
+  }
+
+  const auto result = x2_navigation::filterPointCloudToVoxels(
+    input, makeTransform(), std_msgs::msg::Header{},
+    x2_navigation::PointCloudVoxelFilterConfig{0.05, -0.45, 0.30, 2U});
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result->sampled_point_count, 2U);
+  ASSERT_EQ(result->retained_point_count, 2U);
+  EXPECT_NEAR(readOutputValue(result->cloud, 0U, 0U), 1.0F, 1e-6F);
+  EXPECT_NEAR(readOutputValue(result->cloud, 1U, 0U), 1.5F, 1e-6F);
 }
