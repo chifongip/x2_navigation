@@ -104,8 +104,13 @@ def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     assert '"lidar_timestamp_offset_sec"' in launch_source
     assert 'default_value="0.0"' in launch_source
     assert '"timestamp_offset_sec": ParameterValue(' in launch_source
-    assert 'package="pointcloud_to_laserscan"' not in launch_source
-    assert 'executable="pointcloud_to_laserscan_node"' not in launch_source
+    assert 'package="pointcloud_to_laserscan"' in launch_source
+    assert 'executable="pointcloud_to_laserscan_node"' in launch_source
+    assert 'default_value="/scan_nav/laser"' in launch_source
+    assert '("cloud_in", "/scan_nav/cloud")' in launch_source
+    assert '("scan", laser_scan_topic)' in launch_source
+    assert '"laser_scan_range_min"' in launch_source
+    assert '"laser_scan_range_max"' in launch_source
 
 
 def test_navigation_uses_navfn_pluginlib_identifier():
@@ -140,7 +145,11 @@ def test_navigation_runtime_dependencies_and_resources_are_packaged():
         dependency.text for dependency in package.findall("exec_depend")
     }
 
-    assert {"ament_index_python", "nav2_costmap_2d"} <= exec_dependencies
+    assert {
+        "ament_index_python",
+        "nav2_costmap_2d",
+        "pointcloud_to_laserscan",
+    } <= exec_dependencies
 
     cmake_source = CMAKE_FILE.read_text(encoding="utf-8")
     assert "install(DIRECTORY config launch map rviz DESTINATION share/${PROJECT_NAME})" in cmake_source

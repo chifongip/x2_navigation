@@ -68,6 +68,7 @@ The local costmap consumes dynamic obstacles through this bounded pipeline:
   -> lidar_cloud_throttle (newest cloud every 100 ms)
   -> base_link transform, height crop, 0.05 m voxel downsampling
   -> /scan_nav/cloud (compact XYZ PointCloud2)
+  -> pointcloud_to_laserscan -> /scan_nav/laser (panel visualization only)
   -> local obstacle layer (marking and clearing)
 ```
 
@@ -86,6 +87,27 @@ static-map only, and Nav2 does not consume FAST-LIO's registered clouds.
 
 Point-cloud clearing raytraces only to retained returns. Unlike a LaserScan,
 it has no infinity returns to clear empty sectors out to maximum range.
+
+`pointcloud_to_laserscan` is a standard ROS 2 package used only to make a
+lightweight map-alignment view for `x2_operator_panel`; Nav2 continues to use
+`/scan_nav/cloud`. The converter consumes the same already bounded
+`/scan_nav/cloud` input, outputs `/scan_nav/laser` in `base_link`, uses
+one-degree rays over a full turn, and sends infinity for empty sectors. Its
+display range defaults to 0.20-12.0 m and can be changed without altering
+costmap ranges:
+
+```bash
+ros2 launch x2_navigation navigation.launch.py \
+  laser_scan_range_min:=0.20 laser_scan_range_max:=12.0
+```
+
+Verify the package before deployment. On a ROS 2 Humble image without it,
+install the matching system package and rebuild this workspace:
+
+```bash
+ros2 pkg prefix pointcloud_to_laserscan
+sudo apt install ros-humble-pointcloud-to-laserscan
+```
 
 The default timestamp offset is `0.0`, so the navigation pipeline preserves the
 raw LiDAR stamp. Override `lidar_timestamp_offset_sec` only after measuring the

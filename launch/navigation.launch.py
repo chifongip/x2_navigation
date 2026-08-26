@@ -23,6 +23,9 @@ def generate_launch_description():
     velocity_command_timeout_sec = LaunchConfiguration("velocity_command_timeout_sec")
     lidar_pointcloud_topic = LaunchConfiguration("lidar_pointcloud_topic")
     lidar_timestamp_offset_sec = LaunchConfiguration("lidar_timestamp_offset_sec")
+    laser_scan_topic = LaunchConfiguration("laser_scan_topic")
+    laser_scan_range_min = LaunchConfiguration("laser_scan_range_min")
+    laser_scan_range_max = LaunchConfiguration("laser_scan_range_max")
     default_nav_to_pose_bt_xml = LaunchConfiguration("default_nav_to_pose_bt_xml")
     default_nav_through_poses_bt_xml = LaunchConfiguration(
         "default_nav_through_poses_bt_xml"
@@ -106,6 +109,21 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
+                "laser_scan_topic",
+                default_value="/scan_nav/laser",
+                description="LaserScan topic derived from /scan_nav/cloud for monitoring.",
+            ),
+            DeclareLaunchArgument(
+                "laser_scan_range_min",
+                default_value="0.20",
+                description="Minimum valid range in meters for the monitoring laser scan.",
+            ),
+            DeclareLaunchArgument(
+                "laser_scan_range_max",
+                default_value="12.0",
+                description="Maximum valid range in meters for the monitoring laser scan.",
+            ),
+            DeclareLaunchArgument(
                 "default_nav_to_pose_bt_xml",
                 default_value=str(
                     nav2_bt_navigator_path
@@ -162,6 +180,36 @@ def generate_launch_description():
                             lidar_timestamp_offset_sec, value_type=float
                         ),
                     },
+                ],
+            ),
+            Node(
+                package="pointcloud_to_laserscan",
+                executable="pointcloud_to_laserscan_node",
+                name="navigation_laser_scan",
+                output="screen",
+                parameters=[
+                    {
+                        "target_frame": "base_link",
+                        "transform_tolerance": 0.05,
+                        "min_height": -0.45,
+                        "max_height": 0.30,
+                        "angle_min": -3.141592653589793,
+                        "angle_max": 3.141592653589793,
+                        "angle_increment": 0.017453292519943295,
+                        "scan_time": 0.1,
+                        "range_min": ParameterValue(
+                            laser_scan_range_min, value_type=float
+                        ),
+                        "range_max": ParameterValue(
+                            laser_scan_range_max, value_type=float
+                        ),
+                        "use_inf": True,
+                        "inf_epsilon": 1.0,
+                    }
+                ],
+                remappings=[
+                    ("cloud_in", "/scan_nav/cloud"),
+                    ("scan", laser_scan_topic),
                 ],
             ),
             Node(
