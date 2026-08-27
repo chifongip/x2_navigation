@@ -37,16 +37,20 @@ def test_navigation_velocity_footprint_and_costmap_settings():
 
     assert controller["min_vel_x"] == 0.0
     assert controller["max_vel_x"] == 0.5
-    assert controller["min_vel_theta"] == -0.5
-    assert controller["max_vel_theta"] == 0.5
+    assert controller["min_vel_theta"] == -1.0
+    assert controller["max_vel_theta"] == 1.0
+    assert controller["max_speed_theta"] == 1.0
 
     local_costmap = configuration["local_costmap"]["local_costmap"]["ros__parameters"]
     global_costmap = configuration["global_costmap"]["global_costmap"]["ros__parameters"]
     assert local_costmap["robot_radius"] == 0.30
     assert global_costmap["robot_radius"] == 0.30
     assert local_costmap["plugins"] == ["obstacle_layer", "inflation_layer"]
-    assert global_costmap["plugins"] == ["static_layer", "inflation_layer"]
-    assert "obstacle_layer" not in global_costmap
+    assert global_costmap["plugins"] == [
+        "static_layer",
+        "obstacle_layer",
+        "inflation_layer",
+    ]
 
     obstacle_layer = local_costmap["obstacle_layer"]
     assert obstacle_layer["plugin"] == "nav2_costmap_2d::ObstacleLayer"
@@ -65,6 +69,7 @@ def test_navigation_velocity_footprint_and_costmap_settings():
         "raytrace_max_range": 5.5,
         "observation_persistence": 1.0,
     }
+    assert global_costmap["obstacle_layer"] == obstacle_layer
     assert local_costmap["inflation_layer"] == {
         "plugin": "nav2_costmap_2d::InflationLayer",
         "inflation_radius": 1.0,

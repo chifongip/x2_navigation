@@ -143,6 +143,17 @@ class TestNavigationLifecycle(unittest.TestCase):
                 reliability=ReliabilityPolicy.RELIABLE,
             ),
         )
+        self.global_costmap_messages = []
+        self.global_costmap_subscription = self.node.create_subscription(
+            OccupancyGrid,
+            "/global_costmap/costmap",
+            self.global_costmap_messages.append,
+            QoSProfile(
+                depth=1,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE,
+            ),
+        )
         self.cloud_publisher = self.node.create_publisher(
             PointCloud2,
             "/test/lidar_pointcloud",
@@ -163,6 +174,7 @@ class TestNavigationLifecycle(unittest.TestCase):
         self.node.destroy_publisher(self.cloud_publisher)
         self.node.destroy_publisher(self.filtered_cloud_publisher)
         self.node.destroy_publisher(self.joint_state_publisher)
+        self.node.destroy_subscription(self.global_costmap_subscription)
         self.node.destroy_subscription(self.local_costmap_subscription)
         self.node.destroy_subscription(self.navigation_cloud_subscription)
         self.node.destroy_subscription(self.map_subscription)
@@ -274,7 +286,16 @@ class TestNavigationLifecycle(unittest.TestCase):
         )
         self.assertEqual(cloud_nanoseconds, input_nanoseconds)
 
-    def test_navigation_cloud_marks_the_local_costmap(self):
+    @staticmethod
+    def costmap_cost_at(message, x, y):
+        resolution = message.info.resolution
+        cell_x = int((x - message.info.origin.position.x) / resolution)
+        cell_y = int((y - message.info.origin.position.y) / resolution)
+        if not (0 <= cell_x < message.info.width and 0 <= cell_y < message.info.height):
+            return None
+        return message.data[cell_y * message.info.width + cell_x]
+
+    def test_navigation_cloud_marks_the_costmaps(self):
         cloud = PointCloud2()
         cloud.header.frame_id = "base_link"
         cloud.height = 1
@@ -291,21 +312,43 @@ class TestNavigationLifecycle(unittest.TestCase):
         cloud.is_dense = True
 
         deadline = time.monotonic() + 10.0
-        has_lethal_obstacle = False
+        while not self.global_costmap_messages and time.monotonic() < deadline:
+            rclpy.spin_once(self.node, timeout_sec=0.25)
+
+        self.assertTrue(self.global_costmap_messages)
+        self.assertNotEqual(
+            self.costmap_cost_at(self.global_costmap_messages[-1], 1.0, 0.5),
+            100,
+            "test obstacle location is already lethal in the static global costmap",
+        )
+
+        has_local_lethal_obstacle = False
+        has_global_lethal_obstacle = False
         while (
-            not self.navigation_cloud_messages or not has_lethal_obstacle
+            not self.navigation_cloud_messages
+            or not has_local_lethal_obstacle
+            or not has_global_lethal_obstacle
         ) and time.monotonic() < deadline:
             cloud.header.stamp = self.node.get_clock().now().to_msg()
             self.filtered_cloud_publisher.publish(cloud)
             rclpy.spin_once(self.node, timeout_sec=0.25)
-            has_lethal_obstacle = any(
+            has_local_lethal_obstacle = any(
                 100 in message.data for message in self.local_costmap_messages
+            )
+            has_global_lethal_obstacle = any(
+                self.costmap_cost_at(message, 1.0, 0.5) == 100
+                for message in self.global_costmap_messages
             )
 
         self.assertTrue(self.navigation_cloud_messages)
         self.assertTrue(self.local_costmap_messages)
+        self.assertTrue(self.global_costmap_messages)
         self.assertEqual(self.navigation_cloud_messages[-1].width, 1)
         self.assertTrue(
-            has_lethal_obstacle,
+            has_local_lethal_obstacle,
             "local costmap did not mark the obstacle as lethal",
+        )
+        self.assertTrue(
+            has_global_lethal_obstacle,
+            "global costmap did not mark the obstacle as lethal",
         )

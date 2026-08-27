@@ -67,12 +67,12 @@ controller_server:
       max_vel_x: 0.5
       min_vel_y: 0.0
       max_vel_y: 0.0
-      min_vel_theta: -0.5
-      max_vel_theta: 0.5
+      min_vel_theta: -1.0
+      max_vel_theta: 1.0
       min_speed_xy: 0.0
       max_speed_xy: 0.5
       min_speed_theta: 0.0
-      max_speed_theta: 0.5
+      max_speed_theta: 1.0
       acc_lim_x: 0.5
       decel_lim_x: -0.5
       acc_lim_y: 0.0
@@ -152,11 +152,28 @@ global_costmap:
       robot_radius: 0.30
       transform_tolerance: 5.0
       track_unknown_space: true
-      plugins: [static_layer, inflation_layer]
+      plugins: [static_layer, obstacle_layer, inflation_layer]
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
         map_subscribe_transient_local: true
         transform_tolerance: 5.0
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        enabled: true
+        footprint_clearing_enabled: true
+        observation_sources: chest_cloud
+        chest_cloud:
+          topic: /scan_nav/self_filtered_cloud
+          data_type: PointCloud2
+          marking: true
+          clearing: true
+          min_obstacle_height: -1.0
+          max_obstacle_height: 2.0
+          obstacle_min_range: 0.20
+          obstacle_max_range: 5.0
+          raytrace_min_range: 0.20
+          raytrace_max_range: 5.5
+          observation_persistence: 1.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         inflation_radius: 1.0
