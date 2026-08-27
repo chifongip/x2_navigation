@@ -6,6 +6,9 @@ import yaml
 
 PACKAGE_DIR = Path(__file__).parents[1]
 CONFIG_FILE = PACKAGE_DIR / "config" / "nav2_params.yaml"
+SELF_FILTER_CONFIG_FILE = PACKAGE_DIR / "config" / "self_filter.yaml"
+SELF_FILTER_DESCRIPTION_FILE = PACKAGE_DIR / "config" / "x2_self_filter.urdf"
+X2_DESCRIPTION_FILE = PACKAGE_DIR.parent / "x2_description" / "urdf" / "x2_ultra.urdf"
 MAP_FILE = PACKAGE_DIR / "map" / "2026-08-18-Lab_voxel_0_05m.yaml"
 LAUNCH_FILE = PACKAGE_DIR / "launch" / "navigation.launch.py"
 RVIZ_FILE = PACKAGE_DIR / "rviz" / "navigation.rviz"
@@ -47,9 +50,10 @@ def test_navigation_velocity_footprint_and_costmap_settings():
 
     obstacle_layer = local_costmap["obstacle_layer"]
     assert obstacle_layer["plugin"] == "nav2_costmap_2d::ObstacleLayer"
+    assert obstacle_layer["footprint_clearing_enabled"] is True
     assert obstacle_layer["observation_sources"] == "chest_cloud"
     assert obstacle_layer["chest_cloud"] == {
-        "topic": "/scan_nav/cloud",
+        "topic": "/scan_nav/self_filtered_cloud",
         "data_type": "PointCloud2",
         "marking": True,
         "clearing": True,
@@ -60,6 +64,16 @@ def test_navigation_velocity_footprint_and_costmap_settings():
         "raytrace_min_range": 0.20,
         "raytrace_max_range": 5.5,
         "observation_persistence": 1.0,
+    }
+    assert local_costmap["inflation_layer"] == {
+        "plugin": "nav2_costmap_2d::InflationLayer",
+        "inflation_radius": 1.0,
+        "cost_scaling_factor": 4.0,
+    }
+    assert global_costmap["inflation_layer"] == {
+        "plugin": "nav2_costmap_2d::InflationLayer",
+        "inflation_radius": 1.0,
+        "cost_scaling_factor": 4.0,
     }
 
     assert local_costmap["width"] == 6
@@ -101,16 +115,135 @@ def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
     assert 'package="x2_navigation"' in launch_source
     assert 'executable="lidar_cloud_throttle"' in launch_source
+    assert 'package="robot_self_filter"' in launch_source
+    assert 'executable="self_filter"' in launch_source
+    assert '"self_filter.yaml"' in launch_source
+    assert '"x2_self_filter.urdf"' in launch_source
+    assert '"robot_description"' in launch_source
+    assert '("cloud_out", "/scan_nav/self_filtered_cloud")' in launch_source
     assert '"lidar_timestamp_offset_sec"' in launch_source
     assert 'default_value="0.0"' in launch_source
     assert '"timestamp_offset_sec": ParameterValue(' in launch_source
     assert 'package="pointcloud_to_laserscan"' in launch_source
     assert 'executable="pointcloud_to_laserscan_node"' in launch_source
     assert 'default_value="/scan_nav/laser"' in launch_source
-    assert '("cloud_in", "/scan_nav/cloud")' in launch_source
+    assert 'derived from /scan_nav/self_filtered_cloud' in launch_source
+    assert '("cloud_in", "/scan_nav/self_filtered_cloud")' in launch_source
     assert '("scan", laser_scan_topic)' in launch_source
     assert '"laser_scan_range_min"' in launch_source
     assert '"laser_scan_range_max"' in launch_source
+
+
+def test_navigation_self_filter_uses_a_kinematic_x2_collision_proxy():
+    configuration = yaml.safe_load(SELF_FILTER_CONFIG_FILE.read_text(encoding="utf-8"))
+    self_filter = configuration["self_filter"]["ros__parameters"]
+
+    assert self_filter["sensor_frame"] == "lidar_chest_front"
+    assert self_filter["lidar_sensor_type"] == 0
+    assert self_filter["in_pointcloud_topic"] == "/scan_nav/cloud"
+    assert self_filter["max_queue_size"] == 1
+    assert self_filter["keep_organized"] is False
+    assert self_filter["zero_for_removed_points"] is False
+    assert self_filter["invert"] is False
+    assert self_filter["min_sensor_dist"] == 0.05
+    assert self_filter["default_box_scale"] == [1.25, 1.25, 1.25]
+    assert self_filter["default_box_padding"] == [0.01, 0.01, 0.01]
+    assert self_filter["default_sphere_scale"] == 1.25
+    assert self_filter["default_sphere_padding"] == 0.0
+
+    links = self_filter["self_see_links"]["names"]
+    assert len(links) == len(set(links))
+    assert set(links) == {
+        "left_shoulder_pitch_link",
+        "left_shoulder_roll_link",
+        "left_shoulder_yaw_link",
+        "left_elbow_link",
+        "left_wrist_yaw_link",
+        "left_wrist_pitch_link",
+        "left_wrist_roll_link",
+        "left_hand_pad_link",
+        "right_shoulder_pitch_link",
+        "right_shoulder_roll_link",
+        "right_shoulder_yaw_link",
+        "right_elbow_link",
+        "right_wrist_yaw_link",
+        "right_wrist_pitch_link",
+        "right_wrist_roll_link",
+        "right_hand_pad_link",
+    }
+
+    root = ET.parse(SELF_FILTER_DESCRIPTION_FILE).getroot()
+    assert root.attrib["name"] == "x2_self_filter_proxy"
+
+    joints = {joint.attrib["name"]: joint for joint in root.findall("joint")}
+    source_root = ET.parse(X2_DESCRIPTION_FILE).getroot()
+    source_joints = {
+        joint.attrib["name"]: joint for joint in source_root.findall("joint")
+    }
+    assert source_joints.keys() <= joints.keys()
+    for name, source_joint in source_joints.items():
+        proxy_joint = joints[name]
+        assert proxy_joint.attrib == source_joint.attrib
+        for child_name in ("parent", "child", "origin", "axis", "limit"):
+            source_child = source_joint.find(child_name)
+            proxy_child = proxy_joint.find(child_name)
+            assert (proxy_child is None) == (source_child is None)
+            if source_child is not None:
+                assert proxy_child.attrib == source_child.attrib
+
+    assert joints["base_link_joint"].find("parent").attrib["link"] == "base_link"
+    assert joints["base_link_joint"].find("child").attrib["link"] == "pelvis"
+    assert joints["waist_yaw_joint"].find("parent").attrib["link"] == "pelvis"
+    assert joints["waist_yaw_joint"].find("child").attrib["link"] == "waist_yaw_link"
+    assert (
+        joints["left_shoulder_pitch_joint"].find("parent").attrib["link"]
+        == "torso_link"
+    )
+    assert (
+        joints["left_shoulder_pitch_joint"].find("child").attrib["link"]
+        == "left_shoulder_pitch_link"
+    )
+    assert (
+        joints["right_shoulder_pitch_joint"].find("parent").attrib["link"]
+        == "torso_link"
+    )
+    assert (
+        joints["right_shoulder_pitch_joint"].find("child").attrib["link"]
+        == "right_shoulder_pitch_link"
+    )
+    assert (
+        joints["left_hand_pad_joint"].find("parent").attrib["link"]
+        == "left_wrist_roll_link"
+    )
+    assert (
+        joints["right_hand_pad_joint"].find("parent").attrib["link"]
+        == "right_wrist_roll_link"
+    )
+
+    links_by_name = {link.attrib["name"]: link for link in root.findall("link")}
+    assert links_by_name["pelvis"].find("visual/geometry/mesh") is not None
+    assert links_by_name["torso_link"].find("visual/geometry/mesh") is not None
+    assert (
+        links_by_name["left_shoulder_pitch_link"].find("visual/geometry/mesh")
+        is not None
+    )
+    assert (
+        links_by_name["right_shoulder_pitch_link"].find("visual/geometry/mesh")
+        is not None
+    )
+
+    collision_links = {
+        name
+        for name, link in links_by_name.items()
+        if link.find("collision") is not None
+    }
+    assert set(links) < collision_links
+    assert len(collision_links) == 32
+    assert all(
+        collision.find("geometry/box") is not None
+        for link in root.findall("link")
+        for collision in link.findall("collision")
+    )
 
 
 def test_navigation_uses_navfn_pluginlib_identifier():
@@ -149,6 +282,7 @@ def test_navigation_runtime_dependencies_and_resources_are_packaged():
         "ament_index_python",
         "nav2_costmap_2d",
         "pointcloud_to_laserscan",
+        "robot_self_filter",
     } <= exec_dependencies
 
     cmake_source = CMAKE_FILE.read_text(encoding="utf-8")
@@ -179,5 +313,5 @@ def test_rviz_uses_transient_local_qos_for_the_packaged_map():
 
     cloud_display = displays_by_name["Navigation Cloud"]
     assert cloud_display["Class"] == "rviz_default_plugins/PointCloud2"
-    assert cloud_display["Topic"]["Value"] == "/scan_nav/cloud"
+    assert cloud_display["Topic"]["Value"] == "/scan_nav/self_filtered_cloud"
     assert cloud_display["Topic"]["Reliability Policy"] == "Best Effort"

@@ -68,8 +68,10 @@ The local costmap consumes dynamic obstacles through this bounded pipeline:
   -> lidar_cloud_throttle (newest cloud every 100 ms)
   -> base_link transform, height crop, 0.05 m voxel downsampling
   -> /scan_nav/cloud (compact XYZ PointCloud2)
-  -> pointcloud_to_laserscan -> /scan_nav/laser (panel visualization only)
-  -> local obstacle layer (marking and clearing)
+  -> robot_self_filter (live X2 link TF plus collision-box proxy)
+  -> /scan_nav/self_filtered_cloud
+     +-> pointcloud_to_laserscan -> /scan_nav/laser (panel visualization only)
+     +-> local obstacle layer (marking and clearing)
 ```
 
 The throttle uses the live `base_link <- lidar_chest_front` transform because
@@ -80,20 +82,39 @@ phase does not cause avoidable rate-gate misses. Each output still requires a
 fresh input cloud and a timestamp-valid transform. A reusable allocator avoids
 per-frame voxel storage churn, and `max_input_points` bounds work to 40,000
 uniformly sampled raw points per output. The costmap applies the 0.20-5.0 m
-obstacle ranges. Tune the height limits, voxel size, and input bound for the
+obstacle ranges. `x2_self_filter.urdf` preserves the X2 kinematic tree and
+visual meshes, but replaces every production collision mesh with a local
+bounding box. The boxes follow the same live link frames as the shared state
+publisher and avoid the expensive convex-hull construction that the filter
+performs for STL geometry at startup. The proxy dimensions in
+`tools/generate_self_filter_urdf.py` are explicit, so review and retune
+`PROXY_BOXES` after a collision-mesh or geometry change before regenerating
+`x2_self_filter.urdf`. The deployed
+`self_filter.yaml` deliberately selects the arms and hand pads only: the chest
+LiDAR lies within the conservative torso proxy, so filtering that link would
+classify every outgoing ray as self-shadow and erase the environment. The
+boxes are expanded by 25 percent plus one centimetre to absorb voxel-centroid
+error. The filter uses `lidar_chest_front` as the sensor origin even though
+the cloud frame is `base_link`, so points shadowed by the visible upper body
+are removed too. It drops a cloud until timestamp-valid transforms for all
+configured links are available; it never reuses an old robot pose. Add another
+link only after checking that its live filter output does not mask the scene.
+Tune the height limits, voxel size, proxy expansion, and input bound for the
 robot posture and environment; the navigation stack adds only one raw-cloud
 subscriber and keeps it at a bounded rate. The global costmap remains
-static-map only, and Nav2 does not consume FAST-LIO's registered clouds.
+static-map only, and Nav2 does not consume FAST-LIO's registered clouds. Both
+costmaps use a 1.0 m inflation radius to preserve the required clearance around
+obstacles.
 
 Point-cloud clearing raytraces only to retained returns. Unlike a LaserScan,
 it has no infinity returns to clear empty sectors out to maximum range.
 
 `pointcloud_to_laserscan` is a standard ROS 2 package used only to make a
 lightweight map-alignment view for `x2_operator_panel`; Nav2 continues to use
-`/scan_nav/cloud`. The converter consumes the same already bounded
-`/scan_nav/cloud` input, outputs `/scan_nav/laser` in `base_link`, uses
-one-degree rays over a full turn, and sends infinity for empty sectors. Its
-display range defaults to 0.20-12.0 m and can be changed without altering
+`/scan_nav/self_filtered_cloud`. The converter consumes the filtered
+`/scan_nav/self_filtered_cloud` input, outputs `/scan_nav/laser` in `base_link`,
+uses one-degree rays over a full turn, and sends infinity for empty sectors.
+Its display range defaults to 0.20-12.0 m and can be changed without altering
 costmap ranges:
 
 ```bash

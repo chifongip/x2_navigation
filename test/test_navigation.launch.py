@@ -9,15 +9,18 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import Command
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from lifecycle_msgs.srv import GetState
 from nav_msgs.msg import OccupancyGrid
-from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs.msg import JointState, PointCloud2, PointField
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 
 def generate_test_description():
     package_path = Path(get_package_share_directory("x2_navigation"))
+    bringup_path = Path(get_package_share_directory("x2_bringup"))
     static_map_to_odom = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
@@ -28,19 +31,22 @@ def generate_test_description():
         executable="static_transform_publisher",
         arguments=["0", "0", "0", "0", "0", "0", "1", "odom", "base_link"],
     )
-    static_base_to_lidar = Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        arguments=[
-            "0",
-            "0",
-            "0",
-            "0",
-            "0",
-            "0",
-            "1",
-            "base_link",
-            "lidar_chest_front",
+    state_publisher = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        parameters=[
+            {
+                "robot_description": ParameterValue(
+                    Command(
+                        [
+                            "xacro ",
+                            str(bringup_path / "config" / "x2_ultra.urdf.xacro"),
+                        ]
+                    ),
+                    value_type=str,
+                )
+            },
+            {"publish_frequency": 50.0},
         ],
     )
     navigation = IncludeLaunchDescription(
@@ -55,7 +61,7 @@ def generate_test_description():
         [
             static_map_to_odom,
             static_odom_to_base,
-            static_base_to_lidar,
+            state_publisher,
             navigation,
             launch_testing.actions.ReadyToTest(),
         ]
@@ -63,6 +69,40 @@ def generate_test_description():
 
 
 class TestNavigationLifecycle(unittest.TestCase):
+    joint_names = [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_pitch_joint",
+        "waist_roll_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_yaw_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_roll_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_yaw_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_roll_joint",
+        "head_yaw_joint",
+        "head_pitch_joint",
+    ]
+
     @classmethod
     def setUpClass(cls):
         rclpy.init()
@@ -88,7 +128,7 @@ class TestNavigationLifecycle(unittest.TestCase):
         self.navigation_cloud_messages = []
         self.navigation_cloud_subscription = self.node.create_subscription(
             PointCloud2,
-            "/scan_nav/cloud",
+            "/scan_nav/self_filtered_cloud",
             self.navigation_cloud_messages.append,
             sensor_qos,
         )
@@ -108,13 +148,40 @@ class TestNavigationLifecycle(unittest.TestCase):
             "/test/lidar_pointcloud",
             sensor_qos,
         )
+        self.filtered_cloud_publisher = self.node.create_publisher(
+            PointCloud2,
+            "/scan_nav/self_filtered_cloud",
+            sensor_qos,
+        )
+        self.joint_state_publisher = self.node.create_publisher(
+            JointState,
+            "/joint_states",
+            10,
+        )
 
     def tearDown(self):
         self.node.destroy_publisher(self.cloud_publisher)
+        self.node.destroy_publisher(self.filtered_cloud_publisher)
+        self.node.destroy_publisher(self.joint_state_publisher)
         self.node.destroy_subscription(self.local_costmap_subscription)
         self.node.destroy_subscription(self.navigation_cloud_subscription)
         self.node.destroy_subscription(self.map_subscription)
         self.node.destroy_node()
+
+    def publish_zero_joint_states(self):
+        joint_states = JointState()
+        joint_states.header.stamp = self.node.get_clock().now().to_msg()
+        joint_states.name = self.joint_names
+        joint_states.position = [0.0] * len(joint_states.name)
+        self.joint_state_publisher.publish(joint_states)
+        return joint_states.header.stamp
+
+    def publish_zero_joint_states_and_wait_for_tf(self):
+        stamp = self.publish_zero_joint_states()
+        deadline = time.monotonic() + 0.1
+        while time.monotonic() < deadline:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+        return stamp
 
     def wait_for_active_lifecycle_node(self, node_name):
         client = self.node.create_client(GetState, f"/{node_name}/get_state")
@@ -173,24 +240,24 @@ class TestNavigationLifecycle(unittest.TestCase):
         cloud.data = struct.pack(
             "<ffffffffffff",
             1.01,
-            0.00,
+            0.50,
             0.00,
             1.04,
-            0.02,
+            0.50,
             0.00,
             1.08,
-            0.00,
+            0.50,
             0.00,
             1.00,
             0.00,
             0.40,
         )
         cloud.is_dense = True
-        input_stamp = self.node.get_clock().now().to_msg()
-        cloud.header.stamp = input_stamp
-
         deadline = time.monotonic() + 10.0
+        input_stamp = None
         while not self.navigation_cloud_messages and time.monotonic() < deadline:
+            input_stamp = self.publish_zero_joint_states_and_wait_for_tf()
+            cloud.header.stamp = input_stamp
             self.cloud_publisher.publish(cloud)
             rclpy.spin_once(self.node, timeout_sec=0.25)
 
@@ -198,7 +265,7 @@ class TestNavigationLifecycle(unittest.TestCase):
         navigation_cloud = self.navigation_cloud_messages[-1]
         self.assertEqual(navigation_cloud.header.frame_id, "base_link")
         self.assertEqual(navigation_cloud.width, 2)
-        self.assertEqual(navigation_cloud.point_step, 12)
+        self.assertEqual(navigation_cloud.point_step, 16)
         self.assertEqual([field.name for field in navigation_cloud.fields], ["x", "y", "z"])
         input_nanoseconds = input_stamp.sec * 1_000_000_000 + input_stamp.nanosec
         cloud_nanoseconds = (
@@ -209,7 +276,7 @@ class TestNavigationLifecycle(unittest.TestCase):
 
     def test_navigation_cloud_marks_the_local_costmap(self):
         cloud = PointCloud2()
-        cloud.header.frame_id = "lidar_chest_front"
+        cloud.header.frame_id = "base_link"
         cloud.height = 1
         cloud.width = 1
         cloud.fields = [
@@ -220,20 +287,25 @@ class TestNavigationLifecycle(unittest.TestCase):
         cloud.is_bigendian = False
         cloud.point_step = 12
         cloud.row_step = cloud.point_step
-        cloud.data = struct.pack("<fff", 1.0, 0.0, 0.0)
+        cloud.data = struct.pack("<fff", 1.0, 0.5, 0.0)
         cloud.is_dense = True
 
         deadline = time.monotonic() + 10.0
         has_lethal_obstacle = False
-        while time.monotonic() < deadline:
+        while (
+            not self.navigation_cloud_messages or not has_lethal_obstacle
+        ) and time.monotonic() < deadline:
             cloud.header.stamp = self.node.get_clock().now().to_msg()
-            self.cloud_publisher.publish(cloud)
+            self.filtered_cloud_publisher.publish(cloud)
             rclpy.spin_once(self.node, timeout_sec=0.25)
             has_lethal_obstacle = any(
                 100 in message.data for message in self.local_costmap_messages
             )
-            if has_lethal_obstacle:
-                break
 
+        self.assertTrue(self.navigation_cloud_messages)
         self.assertTrue(self.local_costmap_messages)
-        self.assertTrue(has_lethal_obstacle)
+        self.assertEqual(self.navigation_cloud_messages[-1].width, 1)
+        self.assertTrue(
+            has_lethal_obstacle,
+            "local costmap did not mark the obstacle as lethal",
+        )

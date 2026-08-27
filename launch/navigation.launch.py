@@ -37,6 +37,11 @@ def generate_launch_description():
         param_rewrites={"use_sim_time": use_sim_time},
         convert_types=True,
     )
+    self_filter_robot_description = {
+        "robot_description": (package_path / "config" / "x2_self_filter.urdf").read_text(
+            encoding="utf-8"
+        )
+    }
 
     lifecycle_nodes = [
         "map_server",
@@ -111,7 +116,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "laser_scan_topic",
                 default_value="/scan_nav/laser",
-                description="LaserScan topic derived from /scan_nav/cloud for monitoring.",
+                description=(
+                    "LaserScan topic derived from /scan_nav/self_filtered_cloud "
+                    "for monitoring."
+                ),
             ),
             DeclareLaunchArgument(
                 "laser_scan_range_min",
@@ -208,8 +216,25 @@ def generate_launch_description():
                     }
                 ],
                 remappings=[
-                    ("cloud_in", "/scan_nav/cloud"),
+                    ("cloud_in", "/scan_nav/self_filtered_cloud"),
                     ("scan", laser_scan_topic),
+                ],
+            ),
+            Node(
+                package="robot_self_filter",
+                executable="self_filter",
+                name="self_filter",
+                output="screen",
+                parameters=[
+                    str(package_path / "config" / "self_filter.yaml"),
+                    self_filter_robot_description,
+                    {
+                        "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
+                    },
+                ],
+                remappings=[
+                    ("cloud_out", "/scan_nav/self_filtered_cloud"),
+                    ("collision_shapes", "/scan_nav/self_filter/collision_shapes"),
                 ],
             ),
             Node(

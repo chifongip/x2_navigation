@@ -1,0 +1,38 @@
+self_filter:
+  ros__parameters:
+    # The input cloud is already expressed in base_link, but ray-shadow
+    # classification needs the physical origin of the chest LiDAR.
+    sensor_frame: lidar_chest_front
+    lidar_sensor_type: 0
+    in_pointcloud_topic: /scan_nav/cloud
+    max_queue_size: 1
+    keep_organized: false
+    zero_for_removed_points: false
+    invert: false
+    min_sensor_dist: 0.05
+
+    # The lightweight proxy boxes bound the X2 collision meshes. Expand them
+    # by 25 percent plus one centimetre for voxel-centroid error.
+    default_box_scale: [1.25, 1.25, 1.25]
+    default_box_padding: [0.01, 0.01, 0.01]
+    default_sphere_scale: 1.25
+    default_sphere_padding: 0.0
+
+    self_see_links:
+      names:
+        - left_shoulder_pitch_link
+        - left_shoulder_roll_link
+        - left_shoulder_yaw_link
+        - left_elbow_link
+        - left_wrist_yaw_link
+        - left_wrist_pitch_link
+        - left_wrist_roll_link
+        - left_hand_pad_link
+        - right_shoulder_pitch_link
+        - right_shoulder_roll_link
+        - right_shoulder_yaw_link
+        - right_elbow_link
+        - right_wrist_yaw_link
+        - right_wrist_pitch_link
+        - right_wrist_roll_link
+        - right_hand_pad_link
