@@ -54,10 +54,13 @@ def test_navigation_velocity_footprint_and_costmap_settings():
 
     obstacle_layer = local_costmap["obstacle_layer"]
     assert obstacle_layer["plugin"] == "nav2_costmap_2d::ObstacleLayer"
+    assert obstacle_layer["min_obstacle_height"] == -1.0
+    assert obstacle_layer["max_obstacle_height"] == 2.0
     assert obstacle_layer["footprint_clearing_enabled"] is True
     assert obstacle_layer["observation_sources"] == "chest_cloud"
     assert obstacle_layer["chest_cloud"] == {
         "topic": "/scan_nav/self_filtered_cloud",
+        "sensor_frame": "lidar_chest_front",
         "data_type": "PointCloud2",
         "marking": True,
         "clearing": True,

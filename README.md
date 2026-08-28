@@ -61,7 +61,7 @@ ros2 launch x2_navigation navigation.launch.py \
   velocity_zmq_endpoint:=tcp://*:8558 velocity_command_timeout_sec:=0.20
 ```
 
-The local costmap consumes dynamic obstacles through this bounded pipeline:
+Both costmaps consume dynamic obstacles through this bounded pipeline:
 
 ```
 /aima/hal/sensor/lidar_chest_front/lidar_pointcloud
@@ -71,7 +71,7 @@ The local costmap consumes dynamic obstacles through this bounded pipeline:
   -> robot_self_filter (live X2 link TF plus collision-box proxy)
   -> /scan_nav/self_filtered_cloud
      +-> pointcloud_to_laserscan -> /scan_nav/laser (panel visualization only)
-     +-> local obstacle layer (marking and clearing)
+     +-> local and global obstacle layers (marking and clearing)
 ```
 
 The throttle uses the live `base_link <- lidar_chest_front` transform because
@@ -94,17 +94,18 @@ performs for STL geometry at startup. The proxy dimensions in
 LiDAR lies within the conservative torso proxy, so filtering that link would
 classify every outgoing ray as self-shadow and erase the environment. The
 boxes are expanded by 25 percent plus one centimetre to absorb voxel-centroid
-error. The filter uses `lidar_chest_front` as the sensor origin even though
-the cloud frame is `base_link`, so points shadowed by the visible upper body
-are removed too. It drops a cloud until timestamp-valid transforms for all
+error. The filter and both Nav2 obstacle layers use `lidar_chest_front` as the
+sensor origin even though the cloud frame is `base_link`, so points shadowed by
+the visible upper body are removed and raytracing starts at the physical LiDAR.
+The filter drops a cloud until timestamp-valid transforms for all
 configured links are available; it never reuses an old robot pose. Add another
 link only after checking that its live filter output does not mask the scene.
 Tune the height limits, voxel size, proxy expansion, and input bound for the
 robot posture and environment; the navigation stack adds only one raw-cloud
-subscriber and keeps it at a bounded rate. The global costmap remains
-static-map only, and Nav2 does not consume FAST-LIO's registered clouds. Both
-costmaps use a 1.0 m inflation radius to preserve the required clearance around
-obstacles.
+subscriber and keeps it at a bounded rate. The global costmap combines the
+static map with these live obstacles, and Nav2 does not consume FAST-LIO's
+registered clouds. Both costmaps use a 1.0 m inflation radius to preserve the
+required clearance around obstacles.
 
 Point-cloud clearing raytraces only to retained returns. Unlike a LaserScan,
 it has no infinity returns to clear empty sectors out to maximum range.

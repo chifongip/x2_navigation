@@ -308,7 +308,7 @@ class TestNavigationLifecycle(unittest.TestCase):
         cloud.is_bigendian = False
         cloud.point_step = 12
         cloud.row_step = cloud.point_step
-        cloud.data = struct.pack("<fff", 1.0, 0.5, 0.0)
+        cloud.data = struct.pack("<fff", 1.0, 0.5, -0.10)
         cloud.is_dense = True
 
         deadline = time.monotonic() + 10.0
@@ -329,7 +329,7 @@ class TestNavigationLifecycle(unittest.TestCase):
             or not has_local_lethal_obstacle
             or not has_global_lethal_obstacle
         ) and time.monotonic() < deadline:
-            cloud.header.stamp = self.node.get_clock().now().to_msg()
+            cloud.header.stamp = self.publish_zero_joint_states_and_wait_for_tf()
             self.filtered_cloud_publisher.publish(cloud)
             rclpy.spin_once(self.node, timeout_sec=0.25)
             has_local_lethal_obstacle = any(
