@@ -4,7 +4,7 @@ self_filter:
     # classification needs the physical origin of the chest LiDAR.
     sensor_frame: lidar_chest_front
     lidar_sensor_type: 0
-    in_pointcloud_topic: /scan_nav/cloud
+    in_pointcloud_topic: /scan_nav/ground_filtered_cloud
     max_queue_size: 1
     keep_organized: false
     zero_for_removed_points: false

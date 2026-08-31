@@ -1,0 +1,31 @@
+ground_segmentation:
+  ros__parameters:
+    # The input from lidar_cloud_throttle is already expressed in base_link.
+    robot_frame: base_link
+    maxX: 6.0
+    minX: -6.0
+    maxY: 6.0
+    minY: -6.0
+    maxZ: 0.30
+    minZ: -0.45
+    downsample: false
+    downsample_resolution: 0.05
+
+    # With a base_link-framed input, this is the expected floor height in
+    # base_link rather than a sensor-frame mounting offset. It matches the
+    # lower edge of the upstream retained band; retune it with the robot's
+    # nominal standing posture whenever those height bounds change.
+    lidar_to_ground: -0.45
+    transform_tolerance: 0.05
+
+    # Two-phase GSeg3D settings for the 5 cm voxel cloud.
+    cellSizeX: 0.5
+    cellSizeY: 0.5
+    cellSizeZ: 1.0
+    cellSizeZPhase2: 0.25
+    slopeThresholdDegrees: 20.0
+    groundInlierThreshold: 0.08
+    centroidSearchRadius: 5.0
+    maxGroundHeightDeviation: 0.15
+    use_imu_orientation: false
+    show_benchmark: false

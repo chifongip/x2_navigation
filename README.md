@@ -68,6 +68,8 @@ Both costmaps consume dynamic obstacles through this bounded pipeline:
   -> lidar_cloud_throttle (newest cloud every 100 ms)
   -> base_link transform, height crop, 0.05 m voxel downsampling
   -> /scan_nav/cloud (compact XYZ PointCloud2)
+  -> ground_segmentation_ros2 (two-phase ground segmentation)
+  -> /scan_nav/ground_filtered_cloud (non-ground points)
   -> robot_self_filter (live X2 link TF plus collision-box proxy)
   -> /scan_nav/self_filtered_cloud
      +-> pointcloud_to_laserscan -> /scan_nav/laser (panel visualization only)
@@ -76,8 +78,15 @@ Both costmaps consume dynamic obstacles through this bounded pipeline:
 
 The throttle uses the live `base_link <- lidar_chest_front` transform because
 the chest LiDAR axes are rotated. It retains points from -0.45 m to 0.30 m in
-the `base_link` frame and publishes one XYZ centroid per 0.05 m voxel. It
-processes the newest received cloud from a 10 Hz timer, so callback arrival
+the `base_link` frame and publishes one XYZ centroid per 0.05 m voxel. The
+GSeg3D wrapper then receives `/scan_nav/cloud` with sensor-data QoS and sends
+only its non-ground `obstacle_points` result to `/scan_nav/ground_filtered_cloud`.
+Its X2 configuration uses the lower edge of the retained height band as the
+ground seed because the cloud has already been transformed to `base_link`.
+Retune `lidar_to_ground` together with the throttle height bounds after a
+standing-posture or sensor-mount change; inspect `/scan_nav/ground_points` and
+`/scan_nav/ground_filter_input` before deploying a new value. It processes the
+newest received cloud from a 10 Hz timer, so callback arrival
 phase does not cause avoidable rate-gate misses. Each output still requires a
 fresh input cloud and a timestamp-valid transform. A reusable allocator avoids
 per-frame voxel storage churn, and `max_input_points` bounds work to 40,000

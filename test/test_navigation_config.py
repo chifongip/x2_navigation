@@ -7,6 +7,7 @@ import yaml
 PACKAGE_DIR = Path(__file__).parents[1]
 CONFIG_FILE = PACKAGE_DIR / "config" / "nav2_params.yaml"
 SELF_FILTER_CONFIG_FILE = PACKAGE_DIR / "config" / "self_filter.yaml"
+GROUND_SEGMENTATION_CONFIG_FILE = PACKAGE_DIR / "config" / "ground_segmentation.yaml"
 SELF_FILTER_DESCRIPTION_FILE = PACKAGE_DIR / "config" / "x2_self_filter.urdf"
 X2_DESCRIPTION_FILE = PACKAGE_DIR.parent / "x2_description" / "urdf" / "x2_ultra.urdf"
 MAP_FILE = PACKAGE_DIR / "map" / "2026-08-18-Lab_voxel_0_05m.yaml"
@@ -123,6 +124,11 @@ def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
     assert 'package="x2_navigation"' in launch_source
     assert 'executable="lidar_cloud_throttle"' in launch_source
+    assert 'package="ground_segmentation_ros2"' in launch_source
+    assert 'executable="ground_segmentation_ros2_node"' in launch_source
+    assert '"ground_segmentation.yaml"' in launch_source
+    assert '("/ground_segmentation/input_pointcloud", "/scan_nav/cloud")' in launch_source
+    assert '"/scan_nav/ground_filtered_cloud"' in launch_source
     assert 'package="robot_self_filter"' in launch_source
     assert 'executable="self_filter"' in launch_source
     assert '"self_filter.yaml"' in launch_source
@@ -142,13 +148,44 @@ def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     assert '"laser_scan_range_max"' in launch_source
 
 
+def test_navigation_ground_segmentation_removes_ground_before_self_filter():
+    configuration = yaml.safe_load(
+        GROUND_SEGMENTATION_CONFIG_FILE.read_text(encoding="utf-8")
+    )
+    segmentation = configuration["ground_segmentation"]["ros__parameters"]
+
+    assert segmentation == {
+        "robot_frame": "base_link",
+        "maxX": 6.0,
+        "minX": -6.0,
+        "maxY": 6.0,
+        "minY": -6.0,
+        "maxZ": 0.30,
+        "minZ": -0.45,
+        "downsample": False,
+        "downsample_resolution": 0.05,
+        "lidar_to_ground": -0.45,
+        "transform_tolerance": 0.05,
+        "cellSizeX": 0.5,
+        "cellSizeY": 0.5,
+        "cellSizeZ": 1.0,
+        "cellSizeZPhase2": 0.25,
+        "slopeThresholdDegrees": 20.0,
+        "groundInlierThreshold": 0.08,
+        "centroidSearchRadius": 5.0,
+        "maxGroundHeightDeviation": 0.15,
+        "use_imu_orientation": False,
+        "show_benchmark": False,
+    }
+
+
 def test_navigation_self_filter_uses_a_kinematic_x2_collision_proxy():
     configuration = yaml.safe_load(SELF_FILTER_CONFIG_FILE.read_text(encoding="utf-8"))
     self_filter = configuration["self_filter"]["ros__parameters"]
 
     assert self_filter["sensor_frame"] == "lidar_chest_front"
     assert self_filter["lidar_sensor_type"] == 0
-    assert self_filter["in_pointcloud_topic"] == "/scan_nav/cloud"
+    assert self_filter["in_pointcloud_topic"] == "/scan_nav/ground_filtered_cloud"
     assert self_filter["max_queue_size"] == 1
     assert self_filter["keep_organized"] is False
     assert self_filter["zero_for_removed_points"] is False
@@ -288,6 +325,7 @@ def test_navigation_runtime_dependencies_and_resources_are_packaged():
 
     assert {
         "ament_index_python",
+        "ground_segmentation_ros2",
         "nav2_costmap_2d",
         "pointcloud_to_laserscan",
         "robot_self_filter",

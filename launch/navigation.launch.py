@@ -191,6 +191,25 @@ def generate_launch_description():
                 ],
             ),
             Node(
+                package="ground_segmentation_ros2",
+                executable="ground_segmentation_ros2_node",
+                name="ground_segmentation",
+                output="screen",
+                parameters=[
+                    str(package_path / "config" / "ground_segmentation.yaml"),
+                    {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)},
+                ],
+                remappings=[
+                    ("/ground_segmentation/input_pointcloud", "/scan_nav/cloud"),
+                    ("/ground_segmentation/ground_points", "/scan_nav/ground_points"),
+                    (
+                        "/ground_segmentation/obstacle_points",
+                        "/scan_nav/ground_filtered_cloud",
+                    ),
+                    ("/ground_segmentation/raw_points", "/scan_nav/ground_filter_input"),
+                ],
+            ),
+            Node(
                 package="pointcloud_to_laserscan",
                 executable="pointcloud_to_laserscan_node",
                 name="navigation_laser_scan",

@@ -132,6 +132,20 @@ class TestNavigationLifecycle(unittest.TestCase):
             self.navigation_cloud_messages.append,
             sensor_qos,
         )
+        self.ground_cloud_messages = []
+        self.ground_cloud_subscription = self.node.create_subscription(
+            PointCloud2,
+            "/scan_nav/ground_points",
+            self.ground_cloud_messages.append,
+            sensor_qos,
+        )
+        self.ground_filtered_cloud_messages = []
+        self.ground_filtered_cloud_subscription = self.node.create_subscription(
+            PointCloud2,
+            "/scan_nav/ground_filtered_cloud",
+            self.ground_filtered_cloud_messages.append,
+            sensor_qos,
+        )
         self.local_costmap_messages = []
         self.local_costmap_subscription = self.node.create_subscription(
             OccupancyGrid,
@@ -159,6 +173,11 @@ class TestNavigationLifecycle(unittest.TestCase):
             "/test/lidar_pointcloud",
             sensor_qos,
         )
+        self.ground_filter_input_publisher = self.node.create_publisher(
+            PointCloud2,
+            "/scan_nav/cloud",
+            sensor_qos,
+        )
         self.filtered_cloud_publisher = self.node.create_publisher(
             PointCloud2,
             "/scan_nav/self_filtered_cloud",
@@ -172,10 +191,13 @@ class TestNavigationLifecycle(unittest.TestCase):
 
     def tearDown(self):
         self.node.destroy_publisher(self.cloud_publisher)
+        self.node.destroy_publisher(self.ground_filter_input_publisher)
         self.node.destroy_publisher(self.filtered_cloud_publisher)
         self.node.destroy_publisher(self.joint_state_publisher)
         self.node.destroy_subscription(self.global_costmap_subscription)
         self.node.destroy_subscription(self.local_costmap_subscription)
+        self.node.destroy_subscription(self.ground_filtered_cloud_subscription)
+        self.node.destroy_subscription(self.ground_cloud_subscription)
         self.node.destroy_subscription(self.navigation_cloud_subscription)
         self.node.destroy_subscription(self.map_subscription)
         self.node.destroy_node()
@@ -266,25 +288,68 @@ class TestNavigationLifecycle(unittest.TestCase):
         )
         cloud.is_dense = True
         deadline = time.monotonic() + 10.0
-        input_stamp = None
+        input_nanoseconds = set()
         while not self.navigation_cloud_messages and time.monotonic() < deadline:
             input_stamp = self.publish_zero_joint_states_and_wait_for_tf()
             cloud.header.stamp = input_stamp
+            input_nanoseconds.add(
+                input_stamp.sec * 1_000_000_000 + input_stamp.nanosec
+            )
             self.cloud_publisher.publish(cloud)
             rclpy.spin_once(self.node, timeout_sec=0.25)
 
         self.assertTrue(self.navigation_cloud_messages)
         navigation_cloud = self.navigation_cloud_messages[-1]
         self.assertEqual(navigation_cloud.header.frame_id, "base_link")
-        self.assertEqual(navigation_cloud.width, 2)
+        self.assertEqual(navigation_cloud.width, 0)
         self.assertEqual(navigation_cloud.point_step, 16)
         self.assertEqual([field.name for field in navigation_cloud.fields], ["x", "y", "z"])
-        input_nanoseconds = input_stamp.sec * 1_000_000_000 + input_stamp.nanosec
         cloud_nanoseconds = (
             navigation_cloud.header.stamp.sec * 1_000_000_000
             + navigation_cloud.header.stamp.nanosec
         )
-        self.assertEqual(cloud_nanoseconds, input_nanoseconds)
+        self.assertIn(cloud_nanoseconds, input_nanoseconds)
+
+    def test_ground_segmentation_separates_floor_from_obstacles(self):
+        cloud = PointCloud2()
+        cloud.header.frame_id = "base_link"
+        cloud.height = 1
+        cloud.fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        ]
+        cloud.is_bigendian = False
+        cloud.point_step = 12
+
+        points = [
+            (1.05 + 0.05 * x_index, 0.05 + 0.05 * y_index, -0.45)
+            for x_index in range(8)
+            for y_index in range(8)
+        ]
+        points.append((1.25, 0.25, -0.05))
+        cloud.width = len(points)
+        cloud.row_step = cloud.width * cloud.point_step
+        cloud.data = struct.pack(
+            "<" + "f" * 3 * len(points),
+            *(value for point in points for value in point),
+        )
+        cloud.is_dense = True
+
+        deadline = time.monotonic() + 10.0
+        while (
+            not self.ground_cloud_messages
+            or not self.ground_filtered_cloud_messages
+        ) and time.monotonic() < deadline:
+            cloud.header.stamp = self.node.get_clock().now().to_msg()
+            self.ground_filter_input_publisher.publish(cloud)
+            rclpy.spin_once(self.node, timeout_sec=0.25)
+
+        self.assertTrue(self.ground_cloud_messages)
+        self.assertTrue(self.ground_filtered_cloud_messages)
+        self.assertGreater(self.ground_cloud_messages[-1].width, 0)
+        self.assertGreater(self.ground_filtered_cloud_messages[-1].width, 0)
+        self.assertLess(self.ground_filtered_cloud_messages[-1].width, cloud.width)
 
     @staticmethod
     def costmap_cost_at(message, x, y):
