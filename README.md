@@ -43,15 +43,72 @@ ros2 launch x2_navigation navigation.launch.py
 The stack forwards normal, unstamped `geometry_msgs/msg/Twist` commands from
 `/cmd_vel` to the RoboJuDo velocity interface. `nav2_zmq_velocity_bridge`
 binds `tcp://*:8558` and publishes full Twist-shaped JSON at 20 Hz. It clamps
-`linear.x` to 0.0-0.5 m/s, forces all unsupported axes to zero, clamps
-`angular.z` to -0.5-0.5 rad/s, and sends zero velocity if a command is absent,
-invalid, or older than 0.20 s.
+`linear.x` to -0.5-1.0 m/s, `linear.y` to -1.0-1.0 m/s, forces the remaining
+unsupported axes to zero, clamps `angular.z` to -1.0-1.0 rad/s, and sends zero
+velocity if a command is absent, invalid, or older than 0.20 s.
 
 RoboJuDo must be started separately with `VelocityZmqCtrl` enabled and
 connected to `tcp://127.0.0.1:8558`; put it before any joystick controller if
 it should take priority. This package does not modify RoboJuDo configuration.
 Only one process may bind port 8558. Do not use the X2 upper-body command port
 8559 for navigation.
+
+## AprilTag table fine alignment
+
+Fine alignment is a separate operation after coarse `NavigateToPose` completes.
+The public `/fine_align` (`x2_navigation/action/FineAlign`) action defaults to
+measurement only (`execute: false`). It requires Nav2 to be idle, a stable tag9
+pose, and `/manipulation_state` to report `EMPTY` or `HOLDING`. Execution uses a
+local holonomic controller that independently corrects forward, lateral, and yaw
+error while all output continues through Collision Monitor and the ZMQ deadman.
+
+The table detector remains limited to 1 Hz. Three consistent samples are required,
+so readiness and final settled confirmation each take at least three seconds. A
+tag-derived pose remains usable for at most 2.5 seconds. The initial final-base
+target is centered and square to the table at a 0.50 m standoff; commission this
+parameter on hardware before manipulation.
+
+```bash
+# No motion: validate state, tag/TF stability, and capture geometry.
+ros2 action send_goal /fine_align x2_navigation/action/FineAlign \
+  "{execute: false}" --feedback
+
+# Physical fine alignment.
+ros2 action send_goal /fine_align x2_navigation/action/FineAlign \
+  "{execute: true}" --feedback
+```
+
+Nav2 publishes `/cmd_vel_nav`; the fine-align server selects either navigation or
+its internal alignment command. Planar alignment speed is bounded by vector
+magnitude to 0.20-0.30 m/s, preserving the x/y direction, and yaw is bounded to
+0.20-0.30 rad/s. Translation pauses at yaw errors of 20 degrees or more. The
+`x_position_tolerance` and `y_position_tolerance` parameters independently
+define the configured 0.05 m final deadbands; yaw tolerance is 0.0873 rad
+(5 degrees). Reverse x is enabled in the provided configuration; it uses the
+same planar speed range and accepts a target at most 0.15 m behind the robot.
+
+During physical alignment, the server writes an INFO-level progress log every
+`progress_log_interval` seconds (default: 1.0). It includes the current base-frame
+x/y/yaw error, commanded `linear.x`, `linear.y`, and `angular.z`, settling state,
+and stable-tag sequence number.
+
+Collision Monitor and the local/global costmaps reserve the same combined X2
+base and carried-payload envelope: -0.15 m to 0.50 m along x and +/-0.30 m
+along y in `base_link`. The payload cloud filter removes returns only inside
+that already-reserved envelope while the manipulation state is HOLDING. The
+parameter regression checks that the filter can never extend beyond this
+safety footprint. Revise the filter bounds and all three footprints together
+before using a different payload configuration.
+
+`fine_align_server.ros__parameters` configures the tag admission gate, target,
+capture envelope, controller, settling criteria, and timeouts. A stable target
+may be propagated through odometry for at most 2.5 seconds without a fresh tag.
+The previous OpenNav-based prototype is preserved on the local
+`archive/opennav-table-docking` branch.
+
+While `HOLDING`, `payload_cloud_filter` removes only the configured carry envelope
+from the costmap and collision-monitor cloud. Recalibrate that envelope whenever
+box dimensions or the adaptive carry-pose range changes.
 
 Override the bridge transport or watchdog only when the matching RoboJuDo
 receiver configuration is changed:

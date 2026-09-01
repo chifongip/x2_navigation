@@ -11,25 +11,38 @@
 namespace
 {
 
-TEST(VelocityCommand, ClampsNavigationVelocityAndForcesUnusedAxesToZero)
+TEST(VelocityCommand, ClampsNavigationVelocityAndForcesUnsupportedAxesToZero)
 {
   geometry_msgs::msg::Twist twist;
-  twist.linear.x = 1.0;
-  twist.linear.y = 0.25;
+  twist.linear.x = 2.0;
+  twist.linear.y = 2.0;
   twist.linear.z = -0.25;
   twist.angular.x = 0.25;
   twist.angular.y = -0.25;
-  twist.angular.z = -1.0;
+  twist.angular.z = -2.0;
 
   const auto command = x2_navigation::navigationVelocityCommand(twist);
 
   ASSERT_TRUE(command.has_value());
-  EXPECT_DOUBLE_EQ(command->linear_x, 0.5);
-  EXPECT_DOUBLE_EQ(command->linear_y, 0.0);
+  EXPECT_DOUBLE_EQ(command->linear_x, 1.0);
+  EXPECT_DOUBLE_EQ(command->linear_y, 1.0);
   EXPECT_DOUBLE_EQ(command->linear_z, 0.0);
   EXPECT_DOUBLE_EQ(command->angular_x, 0.0);
   EXPECT_DOUBLE_EQ(command->angular_y, 0.0);
-  EXPECT_DOUBLE_EQ(command->angular_z, -0.5);
+  EXPECT_DOUBLE_EQ(command->angular_z, -1.0);
+}
+
+TEST(VelocityCommand, PreservesAndClampsNegativeLinearVelocity)
+{
+  geometry_msgs::msg::Twist twist;
+  twist.linear.x = -2.0;
+  twist.linear.y = -2.0;
+
+  const auto command = x2_navigation::navigationVelocityCommand(twist);
+
+  ASSERT_TRUE(command.has_value());
+  EXPECT_DOUBLE_EQ(command->linear_x, -0.5);
+  EXPECT_DOUBLE_EQ(command->linear_y, -1.0);
 }
 
 TEST(VelocityCommand, RejectsNonFiniteTwistComponents)

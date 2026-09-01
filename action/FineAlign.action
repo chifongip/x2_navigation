@@ -1,0 +1,27 @@
+bool execute
+---
+uint16 SUCCESS=0
+uint16 BUSY=1
+uint16 INVALID_STATE=2
+uint16 NAVIGATION_ACTIVE=3
+uint16 NO_STABLE_TAG=4
+uint16 OUTSIDE_CAPTURE_ENVELOPE=5
+uint16 DOCKING_FAILED=6
+uint16 COLLISION_STOPPED=7
+uint16 ALIGNMENT_TIMEOUT=8
+uint16 SAFETY_ABORT=9
+bool success
+uint16 error_code
+string message
+geometry_msgs/Pose2D final_error
+uint8 manipulation_state
+---
+uint16 VALIDATING=0
+uint16 ACQUIRING=1
+uint16 CONTROLLING=2
+uint16 REACQUIRING=3
+uint16 SETTLING=4
+uint16 stage
+geometry_msgs/Pose2D current_error
+bool tag_visible
+float32 progress

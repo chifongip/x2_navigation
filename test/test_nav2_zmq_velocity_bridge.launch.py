@@ -79,13 +79,13 @@ class TestNav2ZmqVelocityBridge(unittest.TestCase):
         # Let the ZeroMQ subscription handshake before relying on PUB delivery.
         time.sleep(0.25)
         command = Twist()
-        command.linear.x = 1.0
-        command.linear.y = 0.2
-        command.angular.z = -1.0
+        command.linear.x = 2.0
+        command.linear.y = 2.0
+        command.angular.z = -2.0
 
         expected = {
-            "linear": {"x": 0.5, "y": 0.0, "z": 0.0},
-            "angular": {"x": 0.0, "y": 0.0, "z": -0.5},
+            "linear": {"x": 1.0, "y": 1.0, "z": 0.0},
+            "angular": {"x": 0.0, "y": 0.0, "z": -1.0},
         }
         deadline = time.monotonic() + 2.0
         received = None
@@ -93,6 +93,21 @@ class TestNav2ZmqVelocityBridge(unittest.TestCase):
             self.publisher.publish(command)
             received = self.receive_until(lambda message: message == expected, timeout=0.25)
         self.assertEqual(received, expected)
+
+        command.linear.x = -2.0
+        command.linear.y = -2.0
+        reverse_expected = {
+            "linear": {"x": -0.5, "y": -1.0, "z": 0.0},
+            "angular": {"x": 0.0, "y": 0.0, "z": -1.0},
+        }
+        received = None
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and received is None:
+            self.publisher.publish(command)
+            received = self.receive_until(
+                lambda message: message == reverse_expected, timeout=0.25
+            )
+        self.assertEqual(received, reverse_expected)
 
         zero = {
             "linear": {"x": 0.0, "y": 0.0, "z": 0.0},

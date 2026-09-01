@@ -27,6 +27,18 @@ lidar_cloud_throttle:
     max_height: 0.30
     max_input_points: 40000
 
+# This 2-D envelope is also reserved by Collision Monitor and both costmaps.
+# Keep it identical to their footprint extents so returns from the carried
+# payload are never filtered outside the space Navigation2 reserves.
+payload_cloud_filter:
+  ros__parameters:
+    min_x: -0.15
+    max_x: 0.50
+    min_y: -0.30
+    max_y: 0.30
+    min_z: 0.03
+    max_z: 0.56
+
 bt_navigator:
   ros__parameters:
     use_sim_time: false
@@ -102,6 +114,79 @@ controller_server:
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
 
+fine_align_server:
+  ros__parameters:
+    use_sim_time: false
+    fixed_frame: odom
+    base_frame: base_link
+    odom_topic: /odom
+    tag_frame: tag9
+    tag_id: 9
+    detections_topic: /front_center_rectify/detections
+    minimum_decision_margin: 20.0
+    standoff: 0.5
+    lateral_offset: 0.0
+    yaw_offset: 0.0
+    maximum_pose_age: 2.5
+    maximum_sample_gap: 2.5
+    stable_sample_count: 3
+    maximum_position_spread: 0.1
+    maximum_angular_spread: 0.174532925
+    capture_distance: 1.5
+    capture_lateral: 0.3
+    capture_yaw: 0.5235987756
+    allow_reverse_x: true
+    reverse_capture_distance: 0.15
+    acquisition_timeout: 6.0
+    approach_timeout: 45.0
+    command_timeout: 0.2
+    collision_stop_timeout: 1.0
+    odometry_timeout: 0.5
+    controller_frequency: 20.0
+    progress_log_interval: 1.0
+    translation_gain: 0.5
+    yaw_gain: 1.0
+    translation_speed_min: 0.2
+    translation_speed_max: 0.3
+    angular_speed_min: 0.2
+    angular_speed_max: 0.3
+    translation_yaw_stop: 0.3490658504
+    x_position_tolerance: 0.05
+    y_position_tolerance: 0.05
+    yaw_tolerance: 0.0872664626
+    settled_linear_velocity: 0.03
+    settled_angular_velocity: 0.05
+    settled_sample_count: 3
+
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: base_link
+    odom_frame_id: odom
+    cmd_vel_in_topic: /cmd_vel_raw
+    cmd_vel_out_topic: /cmd_vel
+    transform_tolerance: 1.0
+    source_timeout: 1.0
+    base_shift_correction: true
+    stop_pub_timeout: 1.0
+    # Includes the X2 base and the full carried-payload envelope at all times.
+    polygons: [RobotFootprintStop]
+    RobotFootprintStop:
+      type: polygon
+      points: [0.50, 0.30, 0.50, -0.30, -0.15, -0.30, -0.15, 0.30]
+      action_type: stop
+      max_points: 3
+      visualize: true
+      polygon_pub_topic: /fine_align/collision_stop_polygon
+      enabled: true
+    observation_sources: [chest_cloud]
+    chest_cloud:
+      type: pointcloud
+      topic: /scan_nav/payload_filtered_cloud
+      min_height: -0.45
+      max_height: 0.30
+      enabled: true
+
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -114,7 +199,7 @@ local_costmap:
       width: 6
       height: 6
       resolution: 0.05
-      robot_radius: 0.30
+      footprint: "[[0.50, 0.30], [0.50, -0.30], [-0.15, -0.30], [-0.15, 0.30]]"
       transform_tolerance: 5.0
       plugins: [obstacle_layer, inflation_layer]
       obstacle_layer:
@@ -125,7 +210,7 @@ local_costmap:
         footprint_clearing_enabled: true
         observation_sources: chest_cloud
         chest_cloud:
-          topic: /scan_nav/self_filtered_cloud
+          topic: /scan_nav/payload_filtered_cloud
           sensor_frame: lidar_chest_front
           data_type: PointCloud2
           marking: true
@@ -152,7 +237,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       resolution: 0.05
-      robot_radius: 0.30
+      footprint: "[[0.50, 0.30], [0.50, -0.30], [-0.15, -0.30], [-0.15, 0.30]]"
       transform_tolerance: 5.0
       track_unknown_space: true
       plugins: [static_layer, obstacle_layer, inflation_layer]
@@ -168,7 +253,7 @@ global_costmap:
         footprint_clearing_enabled: true
         observation_sources: chest_cloud
         chest_cloud:
-          topic: /scan_nav/self_filtered_cloud
+          topic: /scan_nav/payload_filtered_cloud
           sensor_frame: lidar_chest_front
           data_type: PointCloud2
           marking: true
