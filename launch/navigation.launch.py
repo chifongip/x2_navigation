@@ -18,6 +18,8 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
     velocity_topic = LaunchConfiguration("velocity_topic")
+    nav_cmd_topic = LaunchConfiguration("nav_cmd_topic")
+    raw_cmd_topic = LaunchConfiguration("raw_cmd_topic")
     velocity_zmq_endpoint = LaunchConfiguration("velocity_zmq_endpoint")
     velocity_publish_rate_hz = LaunchConfiguration("velocity_publish_rate_hz")
     velocity_command_timeout_sec = LaunchConfiguration("velocity_command_timeout_sec")
@@ -49,6 +51,7 @@ def generate_launch_description():
         "controller_server",
         "behavior_server",
         "bt_navigator",
+        "collision_monitor",
     ]
 
     return LaunchDescription(
@@ -83,7 +86,17 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "velocity_topic",
                 default_value="/cmd_vel",
-                description="Nav2 Twist topic forwarded to RoboJuDo over ZMQ.",
+                description="Collision-monitor output consumed by the ZMQ velocity bridge.",
+            ),
+            DeclareLaunchArgument(
+                "nav_cmd_topic",
+                default_value="/cmd_vel_nav",
+                description="Twist output from Nav2 controller_server into fine-align arbitration.",
+            ),
+            DeclareLaunchArgument(
+                "raw_cmd_topic",
+                default_value="/cmd_vel_raw",
+                description="Fine-align arbitration output consumed by Collision Monitor.",
             ),
             DeclareLaunchArgument(
                 "velocity_zmq_endpoint",
@@ -235,7 +248,7 @@ def generate_launch_description():
                     }
                 ],
                 remappings=[
-                    ("cloud_in", "/scan_nav/self_filtered_cloud"),
+                    ("cloud_in", "/scan_nav/payload_filtered_cloud"),
                     ("scan", laser_scan_topic),
                 ],
             ),
@@ -254,6 +267,19 @@ def generate_launch_description():
                 remappings=[
                     ("cloud_out", "/scan_nav/self_filtered_cloud"),
                     ("collision_shapes", "/scan_nav/self_filter/collision_shapes"),
+                ],
+            ),
+            Node(
+                package="x2_navigation",
+                executable="payload_cloud_filter",
+                name="payload_cloud_filter",
+                output="screen",
+                parameters=[
+                    configured_params,
+                    {
+                        "input_topic": "/scan_nav/self_filtered_cloud",
+                        "output_topic": "/scan_nav/payload_filtered_cloud",
+                    },
                 ],
             ),
             Node(
@@ -276,6 +302,7 @@ def generate_launch_description():
                 name="controller_server",
                 output="screen",
                 parameters=[configured_params],
+                remappings=[("cmd_vel", nav_cmd_topic)],
             ),
             Node(
                 package="nav2_behaviors",
@@ -283,6 +310,7 @@ def generate_launch_description():
                 name="behavior_server",
                 output="screen",
                 parameters=[configured_params],
+                remappings=[("cmd_vel", nav_cmd_topic)],
             ),
             Node(
                 package="nav2_bt_navigator",
@@ -294,6 +322,34 @@ def generate_launch_description():
                     {
                         "default_nav_to_pose_bt_xml": default_nav_to_pose_bt_xml,
                         "default_nav_through_poses_bt_xml": default_nav_through_poses_bt_xml,
+                    },
+                ],
+            ),
+            Node(
+                package="nav2_collision_monitor",
+                executable="collision_monitor",
+                name="collision_monitor",
+                output="screen",
+                parameters=[
+                    configured_params,
+                    {
+                        "cmd_vel_in_topic": raw_cmd_topic,
+                        "cmd_vel_out_topic": velocity_topic,
+                    },
+                ],
+            ),
+            Node(
+                package="x2_navigation",
+                executable="fine_align_server",
+                name="fine_align_server",
+                output="screen",
+                respawn=True,
+                respawn_delay=1.0,
+                parameters=[
+                    configured_params,
+                    {
+                        "nav_cmd_topic": nav_cmd_topic,
+                        "raw_cmd_topic": raw_cmd_topic,
                     },
                 ],
             ),

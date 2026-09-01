@@ -48,8 +48,9 @@ inline std::optional<VelocityCommand> navigationVelocityCommand(
   }
 
   VelocityCommand command;
-  command.linear_x = std::clamp(twist.linear.x, 0.0, 0.5);
-  command.angular_z = std::clamp(twist.angular.z, -0.5, 0.5);
+  command.linear_x = std::clamp(twist.linear.x, -0.5, 1.0);
+  command.linear_y = std::clamp(twist.linear.y, -1.0, 1.0);
+  command.angular_z = std::clamp(twist.angular.z, -1.0, 1.0);
   return command;
 }
 

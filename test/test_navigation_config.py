@@ -44,8 +44,9 @@ def test_navigation_velocity_footprint_and_costmap_settings():
 
     local_costmap = configuration["local_costmap"]["local_costmap"]["ros__parameters"]
     global_costmap = configuration["global_costmap"]["global_costmap"]["ros__parameters"]
-    assert local_costmap["robot_radius"] == 0.30
-    assert global_costmap["robot_radius"] == 0.30
+    expected_footprint = "[[0.50, 0.30], [0.50, -0.30], [-0.15, -0.30], [-0.15, 0.30]]"
+    assert local_costmap["footprint"] == expected_footprint
+    assert global_costmap["footprint"] == expected_footprint
     assert local_costmap["plugins"] == ["obstacle_layer", "inflation_layer"]
     assert global_costmap["plugins"] == [
         "static_layer",
@@ -60,7 +61,7 @@ def test_navigation_velocity_footprint_and_costmap_settings():
     assert obstacle_layer["footprint_clearing_enabled"] is True
     assert obstacle_layer["observation_sources"] == "chest_cloud"
     assert obstacle_layer["chest_cloud"] == {
-        "topic": "/scan_nav/self_filtered_cloud",
+        "topic": "/scan_nav/payload_filtered_cloud",
         "sensor_frame": "lidar_chest_front",
         "data_type": "PointCloud2",
         "marking": True,
@@ -89,6 +90,16 @@ def test_navigation_velocity_footprint_and_costmap_settings():
     assert type(local_costmap["width"]) is int
     assert local_costmap["height"] == 6
     assert type(local_costmap["height"]) is int
+
+    payload_filter = configuration["payload_cloud_filter"]["ros__parameters"]
+    assert payload_filter == {
+        "min_x": -0.15,
+        "max_x": 0.50,
+        "min_y": -0.30,
+        "max_y": 0.30,
+        "min_z": 0.03,
+        "max_z": 0.56,
+    }
 
 
 def test_navigation_velocity_zmq_bridge_settings():
@@ -135,6 +146,8 @@ def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     assert '"x2_self_filter.urdf"' in launch_source
     assert '"robot_description"' in launch_source
     assert '("cloud_out", "/scan_nav/self_filtered_cloud")' in launch_source
+    assert '"input_topic": "/scan_nav/self_filtered_cloud"' in launch_source
+    assert '"output_topic": "/scan_nav/payload_filtered_cloud"' in launch_source
     assert '"lidar_timestamp_offset_sec"' in launch_source
     assert 'default_value="0.0"' in launch_source
     assert '"timestamp_offset_sec": ParameterValue(' in launch_source
@@ -142,7 +155,8 @@ def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     assert 'executable="pointcloud_to_laserscan_node"' in launch_source
     assert 'default_value="/scan_nav/laser"' in launch_source
     assert 'derived from /scan_nav/self_filtered_cloud' in launch_source
-    assert '("cloud_in", "/scan_nav/self_filtered_cloud")' in launch_source
+    assert '("cloud_in", "/scan_nav/payload_filtered_cloud")' in launch_source
+    assert 'executable="payload_cloud_filter"' in launch_source
     assert '("scan", laser_scan_topic)' in launch_source
     assert '"laser_scan_range_min"' in launch_source
     assert '"laser_scan_range_max"' in launch_source
@@ -315,6 +329,116 @@ def test_navigation_launch_consumes_existing_robot_state():
     assert 'package="controller_manager"' not in launch_source
     assert 'package="robot_state_publisher"' not in launch_source
     assert 'package="x2_bringup"' not in launch_source
+
+
+def test_fine_alignment_docking_and_collision_safety_configuration():
+    configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
+    assert "docking_server" not in configuration
+
+    fine_align = configuration["fine_align_server"]["ros__parameters"]
+    assert fine_align["standoff"] == 0.5
+    assert fine_align["capture_distance"] == 1.5
+    assert fine_align["capture_lateral"] == 0.3
+    assert fine_align["capture_yaw"] == 0.5235987756
+    assert fine_align["stable_sample_count"] >= 3
+    assert fine_align["acquisition_timeout"] >= 6.0
+    assert fine_align["controller_frequency"] == 20.0
+    assert fine_align["progress_log_interval"] == 1.0
+    assert fine_align["translation_gain"] == 0.5
+    assert fine_align["yaw_gain"] == 1.0
+    assert fine_align["translation_speed_min"] == 0.2
+    assert fine_align["translation_speed_max"] == 0.3
+    assert fine_align["angular_speed_min"] == 0.2
+    assert fine_align["angular_speed_max"] == 0.3
+    assert fine_align["translation_yaw_stop"] == 0.3490658504
+    assert fine_align["x_position_tolerance"] == 0.05
+    assert fine_align["y_position_tolerance"] == 0.05
+    assert "position_tolerance" not in fine_align
+    assert fine_align["yaw_tolerance"] == 0.0872664626
+    assert fine_align["settled_sample_count"] >= 3
+    assert fine_align["allow_reverse_x"] is True
+    assert fine_align["reverse_capture_distance"] == 0.15
+    assert "reacquisition_timeout" not in fine_align
+
+    collision = configuration["collision_monitor"]["ros__parameters"]
+    assert collision["cmd_vel_in_topic"] == "/cmd_vel_raw"
+    assert collision["cmd_vel_out_topic"] == "/cmd_vel"
+    assert collision["polygons"] == ["RobotFootprintStop"]
+    footprint_stop = collision["RobotFootprintStop"]
+    assert footprint_stop["action_type"] == "stop"
+    assert footprint_stop["points"] == [
+        0.50, 0.30, 0.50, -0.30, -0.15, -0.30, -0.15, 0.30,
+    ]
+    assert collision["chest_cloud"]["topic"] == "/scan_nav/payload_filtered_cloud"
+
+    payload_filter = configuration["payload_cloud_filter"]["ros__parameters"]
+    safety_x = footprint_stop["points"][::2]
+    safety_y = footprint_stop["points"][1::2]
+    assert min(safety_x) <= payload_filter["min_x"]
+    assert max(safety_x) >= payload_filter["max_x"]
+    assert min(safety_y) <= payload_filter["min_y"]
+    assert max(safety_y) >= payload_filter["max_y"]
+
+    launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
+    assert '"nav_cmd_topic"' in launch_source
+    assert 'default_value="/cmd_vel_nav"' in launch_source
+    assert '"dock_cmd_topic"' not in launch_source
+    assert 'package="opennav_docking"' not in launch_source
+    assert '"docking_server"' not in launch_source
+    assert '"raw_cmd_topic"' in launch_source
+    assert 'default_value="/cmd_vel_raw"' in launch_source
+    assert launch_source.count('remappings=[("cmd_vel", nav_cmd_topic)]') == 2
+    assert '"cmd_vel_in_topic": raw_cmd_topic' in launch_source
+    assert '"cmd_vel_out_topic": velocity_topic' in launch_source
+    assert 'executable="fine_align_server"' in launch_source
+    assert 'executable="collision_monitor"' in launch_source
+
+
+def test_fine_alignment_uses_latest_tag_transform_with_timestamp_coherence_checks():
+    fine_align_source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "fixed_frame_, tag_frame_, tf2::TimePointZero" in fine_align_source
+    assert "tag_frame_, tf2::TimePointZero, tf2::durationFromSec" not in fine_align_source
+    assert "stamp - transform_stamp" in fine_align_source
+    assert "stable_target_stamp_ = stamp" in fine_align_source
+    assert "stable_target_stamp_).seconds() > maximum_pose_age_" in fine_align_source
+
+
+def test_fine_alignment_owns_holonomic_control_and_settling():
+    fine_align_source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "holonomicFineAlignCommand(error, controller_config_)" in fine_align_source
+    assert "message->twist.twist.linear.y" in fine_align_source
+    assert "settled_samples >= settled_sample_count_" in fine_align_source
+    assert "DockRobot" not in fine_align_source
+
+
+def test_fine_alignment_logs_error_and_velocity_command_during_execution():
+    fine_align_source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "progress_log_interval" in fine_align_source
+    assert "Fine-align progress:" in fine_align_source
+    assert "error_base=(x=%.3f m, y=%.3f m, yaw=%.3f rad)" in fine_align_source
+    assert "command=(linear.x=%.3f m/s, linear.y=%.3f m/s, angular.z=%.3f rad/s)" in fine_align_source
+
+
+def test_fine_alignment_logs_abort_context_before_terminating():
+    fine_align_source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Fine-align action abort:" in fine_align_source
+    assert "stable_target_%s" in fine_align_source
+    assert "odometry_%s" in fine_align_source
+    assert fine_align_source.index("logAbortDiagnostic(handle, *result, code, message);") < (
+        fine_align_source.index("handle->abort(result);")
+    )
 
 
 def test_navigation_runtime_dependencies_and_resources_are_packaged():

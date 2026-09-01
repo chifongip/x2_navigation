@@ -2,17 +2,28 @@ cmake_minimum_required(VERSION 3.22)
 project(x2_navigation)
 
 find_package(ament_cmake REQUIRED)
+find_package(action_msgs REQUIRED)
+find_package(agibot_x2_manipulation_msgs REQUIRED)
+find_package(apriltag_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/FineAlign.action"
+  DEPENDENCIES geometry_msgs
+)
 
 add_library(point_cloud_voxel_filter STATIC src/point_cloud_voxel_filter.cpp)
 target_compile_features(point_cloud_voxel_filter PUBLIC cxx_std_17)
@@ -64,10 +75,31 @@ ament_target_dependencies(lidar_cloud_throttle
   tf2_ros
 )
 
+add_executable(fine_align_server src/fine_align_server.cpp)
+target_compile_features(fine_align_server PUBLIC cxx_std_17)
+target_compile_options(fine_align_server PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(fine_align_server PRIVATE include)
+target_link_libraries(fine_align_server Eigen3::Eigen)
+ament_target_dependencies(fine_align_server
+  action_msgs agibot_x2_manipulation_msgs apriltag_msgs geometry_msgs nav_msgs
+  nav2_msgs rclcpp rclcpp_action tf2_eigen tf2_geometry_msgs tf2_ros
+)
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(fine_align_server "${cpp_typesupport_target}")
+
+add_executable(payload_cloud_filter src/payload_cloud_filter.cpp)
+target_compile_features(payload_cloud_filter PUBLIC cxx_std_17)
+target_compile_options(payload_cloud_filter PRIVATE -Wall -Wextra -Wpedantic)
+ament_target_dependencies(payload_cloud_filter
+  agibot_x2_manipulation_msgs rclcpp sensor_msgs
+)
+
 install(TARGETS
   fast_lio_odom_adapter
+  fine_align_server
   nav2_zmq_velocity_bridge
   lidar_cloud_throttle
+  payload_cloud_filter
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY config launch map rviz DESTINATION share/${PROJECT_NAME})
@@ -96,6 +128,17 @@ if(BUILD_TESTING)
   target_include_directories(test_velocity_command PRIVATE include)
   ament_target_dependencies(test_velocity_command geometry_msgs)
 
+  ament_add_gtest(test_holonomic_fine_align test/test_holonomic_fine_align.cpp)
+  target_compile_options(test_holonomic_fine_align PRIVATE -Wall -Wextra -Wpedantic)
+  target_include_directories(test_holonomic_fine_align PRIVATE include)
+  target_link_libraries(test_holonomic_fine_align Eigen3::Eigen)
+  ament_target_dependencies(test_holonomic_fine_align geometry_msgs)
+
+  ament_add_gtest(test_table_dock_geometry test/test_table_dock_geometry.cpp)
+  target_compile_options(test_table_dock_geometry PRIVATE -Wall -Wextra -Wpedantic)
+  target_include_directories(test_table_dock_geometry PRIVATE include)
+  target_link_libraries(test_table_dock_geometry Eigen3::Eigen)
+
   ament_add_gtest(test_point_cloud_voxel_filter test/test_point_cloud_voxel_filter.cpp)
   target_compile_options(test_point_cloud_voxel_filter PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(test_point_cloud_voxel_filter point_cloud_voxel_filter)
@@ -108,9 +151,11 @@ if(BUILD_TESTING)
   )
 
   ament_add_pytest_test(test_navigation_config test/test_navigation_config.py)
+  add_launch_test(test/test_fine_align_server.launch.py TIMEOUT 30)
   add_launch_test(test/test_fast_lio_odom_adapter.launch.py TIMEOUT 30)
   add_launch_test(test/test_navigation.launch.py TIMEOUT 30)
   add_launch_test(test/test_nav2_zmq_velocity_bridge.launch.py TIMEOUT 30)
 endif()
 
+ament_export_dependencies(rosidl_default_runtime)
 ament_package()
