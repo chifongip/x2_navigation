@@ -66,6 +66,12 @@ public:
     reverse_capture_distance_ = declare_parameter("reverse_capture_distance", 0.15);
     acquisition_timeout_ = declare_parameter("acquisition_timeout", 6.0);
     approach_timeout_ = declare_parameter("approach_timeout", 45.0);
+    const auto maximum_retries = declare_parameter("maximum_retries", 2);
+    if (maximum_retries < 0 || maximum_retries > 10) {
+      throw std::invalid_argument("maximum_retries must be between 0 and 10");
+    }
+    maximum_retries_ = static_cast<std::size_t>(maximum_retries);
+    retry_delay_ = declare_parameter("retry_delay", 1.0);
     command_timeout_ = declare_parameter("command_timeout", 0.20);
     collision_stop_timeout_ = declare_parameter("collision_stop_timeout", 1.0);
     odometry_timeout_ = declare_parameter("odometry_timeout", 0.50);
@@ -93,6 +99,7 @@ public:
       !std::isfinite(controller_frequency) || controller_frequency <= 0.0 ||
       !std::isfinite(maximum_pose_age_) || maximum_pose_age_ <= 0.0 ||
       !std::isfinite(reverse_capture_distance_) || reverse_capture_distance_ <= 0.0 ||
+      !std::isfinite(retry_delay_) || retry_delay_ < 0.0 ||
       !std::isfinite(progress_log_interval_) || progress_log_interval_ <= 0.0 ||
       !std::isfinite(odometry_timeout_) || odometry_timeout_ <= 0.0 ||
       !std::isfinite(settled_linear_velocity_) || settled_linear_velocity_ < 0.0 ||
@@ -175,6 +182,12 @@ public:
   }
 
 private:
+  struct AttemptFailure
+  {
+    uint16_t code;
+    std::string message;
+  };
+
   void onDetections(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message)
   {
     const auto found = std::find_if(
@@ -259,7 +272,8 @@ private:
 
   bool waitForMeasurement(
     const std::shared_ptr<GoalHandle> & handle, Eigen::Isometry3d & target,
-    uint8_t & state, std::uint64_t & sequence)
+    uint8_t & state, std::uint64_t & sequence, std::uint64_t minimum_sequence,
+    uint16_t feedback_stage)
   {
     const auto deadline = std::chrono::steady_clock::now() +
       std::chrono::duration<double>(acquisition_timeout_);
@@ -267,16 +281,23 @@ private:
       if (handle->is_canceling() || nav_active_.load()) {
         return false;
       }
-      if (stableMeasurement(target, state, sequence)) {
+      const bool target_available = stableMeasurement(target, state, sequence);
+      if (target_available && sequence > minimum_sequence) {
         return true;
       }
       auto feedback = std::make_shared<FineAlign::Feedback>();
-      feedback->stage = FineAlign::Feedback::ACQUIRING;
-      feedback->tag_visible = false;
+      feedback->stage = feedback_stage;
+      feedback->tag_visible = target_available;
       handle->publish_feedback(feedback);
       std::this_thread::sleep_for(100ms);
     }
     return false;
+  }
+
+  std::uint64_t latestStableTargetSequence() const
+  {
+    std::lock_guard<std::mutex> lock(measurement_mutex_);
+    return stable_target_sequence_;
   }
 
   PlanarError currentError(const Eigen::Isometry3d & target)
@@ -314,35 +335,64 @@ private:
            angular_velocity_ <= settled_angular_velocity_;
   }
 
-  void execute(std::shared_ptr<GoalHandle> handle)
+  static bool retryableFailure(uint16_t code)
   {
-    auto result = std::make_shared<FineAlign::Result>();
-    result->final_error.x = std::numeric_limits<double>::quiet_NaN();
-    result->final_error.y = std::numeric_limits<double>::quiet_NaN();
-    result->final_error.theta = std::numeric_limits<double>::quiet_NaN();
+    return code == FineAlign::Result::NO_STABLE_TAG ||
+           code == FineAlign::Result::OUTSIDE_CAPTURE_ENVELOPE ||
+           code == FineAlign::Result::DOCKING_FAILED ||
+           code == FineAlign::Result::ALIGNMENT_TIMEOUT;
+  }
+
+  bool waitForRetryDelay(
+    const std::shared_ptr<GoalHandle> & handle, const FineAlign::Result & result)
+  {
+    auto feedback = std::make_shared<FineAlign::Feedback>();
+    feedback->stage = FineAlign::Feedback::REACQUIRING;
+    feedback->current_error = result.final_error;
+    feedback->tag_visible = false;
+    feedback->progress = 0.0F;
+    handle->publish_feedback(feedback);
+
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(retry_delay_);
+    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+      if (handle->is_canceling() || nav_active_.load()) {
+        return false;
+      }
+      std::this_thread::sleep_for(100ms);
+    }
+    return rclcpp::ok();
+  }
+
+  std::optional<AttemptFailure> runAttempt(
+    const std::shared_ptr<GoalHandle> & handle, const std::shared_ptr<FineAlign::Result> & result,
+    std::uint64_t minimum_sequence, uint16_t acquisition_stage, std::size_t attempt,
+    std::size_t maximum_attempts)
+  {
     Eigen::Isometry3d target;
     uint8_t state = agibot_x2_manipulation_msgs::msg::ManipulationState::UNKNOWN;
     std::uint64_t sequence = 0;
-    result->manipulation_state = state;
-    if (nav_active_.load()) {
-      finish(handle, result, FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 is active");
-      return;
-    }
-    if (!waitForMeasurement(handle, target, state, sequence)) {
-      if (nav_active_.load()) {
-        finish(handle, result, FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 became active");
-      } else {
-        finishCanceledOrFailed(
-          handle, result, FineAlign::Result::NO_STABLE_TAG, "no stable 1 Hz tag pose");
+    if (!waitForMeasurement(
+        handle, target, state, sequence, minimum_sequence, acquisition_stage))
+    {
+      if (handle->is_canceling()) {
+        return AttemptFailure{FineAlign::Result::ALIGNMENT_TIMEOUT, "fine alignment canceled"};
       }
-      return;
+      if (nav_active_.load()) {
+        return AttemptFailure{FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 became active"};
+      }
+      if (!rclcpp::ok()) {
+        return AttemptFailure{
+          FineAlign::Result::SAFETY_ABORT, "ROS shutdown interrupted alignment"};
+      }
+      return AttemptFailure{
+        FineAlign::Result::NO_STABLE_TAG,
+        minimum_sequence == 0 ? "no stable 1 Hz tag pose" : "no newer stable 1 Hz tag pose"};
     }
     result->manipulation_state = state;
     if (!validState(state)) {
-      finish(
-        handle, result, FineAlign::Result::INVALID_STATE,
-        "manipulation state is not EMPTY or HOLDING");
-      return;
+      return AttemptFailure{
+        FineAlign::Result::INVALID_STATE, "manipulation state is not EMPTY or HOLDING"};
     }
 
     PlanarError error;
@@ -350,22 +400,15 @@ private:
       error = currentError(target);
       result->final_error = errorMessage(error);
     } catch (const tf2::TransformException & exception) {
-      finish(handle, result, FineAlign::Result::SAFETY_ABORT, exception.what());
-      return;
+      return AttemptFailure{FineAlign::Result::SAFETY_ABORT, exception.what()};
     }
     if (!insideCaptureEnvelope(error)) {
-      finish(
-        handle, result, FineAlign::Result::OUTSIDE_CAPTURE_ENVELOPE,
-        "robot is outside the configured fine-align capture envelope");
-      return;
+      return AttemptFailure{
+        FineAlign::Result::OUTSIDE_CAPTURE_ENVELOPE,
+        "robot is outside the configured fine-align capture envelope"};
     }
     if (!handle->get_goal()->execute) {
-      result->success = true;
-      result->error_code = FineAlign::Result::SUCCESS;
-      result->message = "fine-alignment inputs and capture pose are ready";
-      handle->succeed(result);
-      operation_active_.store(false);
-      return;
+      return std::nullopt;
     }
 
     alignment_active_.store(true);
@@ -379,57 +422,44 @@ private:
     std::size_t settled_samples = 0;
     while (rclcpp::ok()) {
       if (handle->is_canceling()) {
-        finishCanceledOrFailed(
-          handle, result, FineAlign::Result::ALIGNMENT_TIMEOUT, "fine alignment canceled");
-        return;
+        return AttemptFailure{FineAlign::Result::ALIGNMENT_TIMEOUT, "fine alignment canceled"};
       }
       if (nav_active_.load()) {
-        finish(handle, result, FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 became active");
-        return;
+        return AttemptFailure{FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 became active"};
       }
       if (collisionStopTimedOut()) {
-        finish(
-          handle, result, FineAlign::Result::COLLISION_STOPPED,
-          "collision monitor stop persisted");
-        return;
+        return AttemptFailure{
+          FineAlign::Result::COLLISION_STOPPED, "collision monitor stop persisted"};
       }
       if (std::chrono::steady_clock::now() > deadline) {
-        finish(
-          handle, result, FineAlign::Result::ALIGNMENT_TIMEOUT, "fine alignment timed out");
-        return;
+        return AttemptFailure{FineAlign::Result::ALIGNMENT_TIMEOUT, "fine alignment timed out"};
       }
       if (!stableMeasurement(target, state, sequence)) {
-        finish(
-          handle, result, FineAlign::Result::NO_STABLE_TAG,
-          "last stable tag target exceeded the pose-age limit");
-        return;
+        return AttemptFailure{
+          FineAlign::Result::NO_STABLE_TAG,
+          "last stable tag target exceeded the pose-age limit"};
       }
       result->manipulation_state = state;
       if (!validState(state)) {
-        finish(
-          handle, result, FineAlign::Result::INVALID_STATE,
-          "manipulation state became invalid during fine alignment");
-        return;
+        return AttemptFailure{
+          FineAlign::Result::INVALID_STATE,
+          "manipulation state became invalid during fine alignment"};
       }
       try {
         error = currentError(target);
         result->final_error = errorMessage(error);
       } catch (const tf2::TransformException & exception) {
-        finish(handle, result, FineAlign::Result::SAFETY_ABORT, exception.what());
-        return;
+        return AttemptFailure{FineAlign::Result::SAFETY_ABORT, exception.what()};
       }
       if (!insideCaptureEnvelope(error)) {
-        finish(
-          handle, result, FineAlign::Result::OUTSIDE_CAPTURE_ENVELOPE,
-          "refined target moved outside the configured capture envelope");
-        return;
+        return AttemptFailure{
+          FineAlign::Result::OUTSIDE_CAPTURE_ENVELOPE,
+          "refined target moved outside the configured capture envelope"};
       }
       const auto command = holonomicFineAlignCommand(error, controller_config_);
       if (!command) {
-        finish(
-          handle, result, FineAlign::Result::SAFETY_ABORT,
-          "holonomic controller rejected its input");
-        return;
+        return AttemptFailure{
+          FineAlign::Result::SAFETY_ABORT, "holonomic controller rejected its input"};
       }
       {
         std::lock_guard<std::mutex> lock(command_mutex_);
@@ -450,10 +480,12 @@ private:
       if (current_steady_time >= next_progress_log) {
         RCLCPP_INFO(
           get_logger(),
-          "Fine-align progress: sequence=%llu; error_base=(x=%.3f m, y=%.3f m, yaw=%.3f rad); "
+          "Fine-align progress: attempt=%zu/%zu; sequence=%llu; "
+          "error_base=(x=%.3f m, y=%.3f m, yaw=%.3f rad); "
           "command=(linear.x=%.3f m/s, linear.y=%.3f m/s, angular.z=%.3f rad/s); "
           "stage=%s; odometry_settled=%s; settled_samples=%zu/%zu",
-          static_cast<unsigned long long>(sequence), error.x, error.y, error.yaw,
+          attempt, maximum_attempts, static_cast<unsigned long long>(sequence),
+          error.x, error.y, error.yaw,
           command->linear.x, command->linear.y, command->angular.z,
           at_goal ? "settling" : "controlling", odometry_settled ? "true" : "false",
           settled_samples, settled_sample_count_);
@@ -469,17 +501,80 @@ private:
       handle->publish_feedback(feedback);
 
       if (settled_samples >= settled_sample_count_) {
+        return std::nullopt;
+      }
+      std::this_thread::sleep_for(controller_period_);
+    }
+    return AttemptFailure{FineAlign::Result::SAFETY_ABORT, "ROS shutdown interrupted alignment"};
+  }
+
+  void execute(std::shared_ptr<GoalHandle> handle)
+  {
+    auto result = std::make_shared<FineAlign::Result>();
+    result->final_error.x = std::numeric_limits<double>::quiet_NaN();
+    result->final_error.y = std::numeric_limits<double>::quiet_NaN();
+    result->final_error.theta = std::numeric_limits<double>::quiet_NaN();
+    result->manipulation_state =
+      agibot_x2_manipulation_msgs::msg::ManipulationState::UNKNOWN;
+    if (nav_active_.load()) {
+      finish(handle, result, FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 is active");
+      return;
+    }
+    const std::size_t maximum_attempts = handle->get_goal()->execute ? maximum_retries_ + 1U : 1U;
+    std::uint64_t minimum_sequence = 0;
+    for (std::size_t attempt = 1; attempt <= maximum_attempts; ++attempt) {
+      if (attempt > 1U && !waitForRetryDelay(handle, *result)) {
+        if (nav_active_.load()) {
+          finish(handle, result, FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 became active");
+        } else {
+          finishCanceledOrFailed(
+            handle, result, FineAlign::Result::ALIGNMENT_TIMEOUT,
+            rclcpp::ok() ? "fine alignment canceled" : "ROS shutdown interrupted alignment");
+        }
+        return;
+      }
+
+      const auto failure = runAttempt(
+        handle, result, minimum_sequence,
+        attempt == 1U ? FineAlign::Feedback::ACQUIRING : FineAlign::Feedback::REACQUIRING,
+        attempt, maximum_attempts);
+      if (!failure) {
         stopAlignment();
         result->success = true;
         result->error_code = FineAlign::Result::SUCCESS;
-        result->message = "table fine alignment succeeded";
+        result->message = handle->get_goal()->execute ?
+          "table fine alignment succeeded on attempt " + std::to_string(attempt) + " of " +
+          std::to_string(maximum_attempts) :
+          "fine-alignment inputs and capture pose are ready";
         handle->succeed(result);
         operation_active_.store(false);
         return;
       }
-      std::this_thread::sleep_for(controller_period_);
+
+      stopAlignment();
+      if (handle->is_canceling()) {
+        finishCanceledOrFailed(handle, result, failure->code, failure->message);
+        return;
+      }
+      const bool will_retry = retryableFailure(failure->code) && attempt < maximum_attempts;
+      if (!will_retry) {
+        std::string message = failure->message;
+        if (retryableFailure(failure->code) && maximum_attempts > 1U) {
+          message += "; retries exhausted after " + std::to_string(attempt) + " attempts";
+        }
+        finish(handle, result, failure->code, message);
+        return;
+      }
+
+      minimum_sequence = latestStableTargetSequence();
+      RCLCPP_WARN(
+        get_logger(),
+        "Fine-align retry: attempt=%zu/%zu failed; code=%u; reason='%s'; "
+        "next_attempt=%zu/%zu; retry_delay=%.3f s; require_target_sequence>%llu",
+        attempt, maximum_attempts, static_cast<unsigned int>(failure->code),
+        failure->message.c_str(), attempt + 1U, maximum_attempts, retry_delay_,
+        static_cast<unsigned long long>(minimum_sequence));
     }
-    finish(handle, result, FineAlign::Result::SAFETY_ABORT, "ROS shutdown interrupted alignment");
   }
 
   void stopAlignment()
@@ -654,13 +749,14 @@ private:
   bool collision_stopped_{false};
   std::string fixed_frame_, base_frame_, tag_frame_;
   int tag_id_{9};
-  std::size_t stable_sample_count_{3}, settled_sample_count_{3};
+  std::size_t stable_sample_count_{3}, settled_sample_count_{3}, maximum_retries_{2};
   HolonomicFineAlignConfig controller_config_;
   std::chrono::nanoseconds controller_period_{50ms};
   double minimum_decision_margin_, standoff_, lateral_offset_, yaw_offset_;
   double maximum_pose_age_, maximum_sample_gap_, maximum_position_spread_, maximum_angular_spread_;
   double capture_distance_, capture_lateral_, capture_yaw_, reverse_capture_distance_;
-  double acquisition_timeout_, approach_timeout_, command_timeout_, collision_stop_timeout_;
+  double acquisition_timeout_, approach_timeout_, retry_delay_, command_timeout_;
+  double collision_stop_timeout_;
   double odometry_timeout_, settled_linear_velocity_, settled_angular_velocity_, progress_log_interval_;
   double linear_velocity_{0.0}, angular_velocity_{0.0};
 };

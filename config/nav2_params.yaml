@@ -133,12 +133,14 @@ fine_align_server:
     maximum_position_spread: 0.1
     maximum_angular_spread: 0.174532925
     capture_distance: 1.5
-    capture_lateral: 0.3
-    capture_yaw: 0.5235987756
+    capture_lateral: 1.5
+    capture_yaw: 0.785398163
     allow_reverse_x: true
-    reverse_capture_distance: 0.15
+    reverse_capture_distance: 0.3
     acquisition_timeout: 6.0
     approach_timeout: 45.0
+    maximum_retries: 2
+    retry_delay: 1.0
     command_timeout: 0.2
     collision_stop_timeout: 1.0
     odometry_timeout: 0.5
@@ -146,13 +148,13 @@ fine_align_server:
     progress_log_interval: 1.0
     translation_gain: 0.5
     yaw_gain: 1.0
-    translation_speed_min: 0.2
-    translation_speed_max: 0.3
-    angular_speed_min: 0.2
-    angular_speed_max: 0.3
+    translation_speed_min: 0.1
+    translation_speed_max: 0.2
+    angular_speed_min: 0.1
+    angular_speed_max: 0.2
     translation_yaw_stop: 0.3490658504
-    x_position_tolerance: 0.05
-    y_position_tolerance: 0.05
+    x_position_tolerance: 0.08
+    y_position_tolerance: 0.08
     yaw_tolerance: 0.0872664626
     settled_linear_velocity: 0.03
     settled_angular_velocity: 0.05

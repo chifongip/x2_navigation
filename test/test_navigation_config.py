@@ -338,26 +338,28 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     fine_align = configuration["fine_align_server"]["ros__parameters"]
     assert fine_align["standoff"] == 0.5
     assert fine_align["capture_distance"] == 1.5
-    assert fine_align["capture_lateral"] == 0.3
-    assert fine_align["capture_yaw"] == 0.5235987756
+    assert fine_align["capture_lateral"] == 1.5
+    assert fine_align["capture_yaw"] == 0.785398163
     assert fine_align["stable_sample_count"] >= 3
     assert fine_align["acquisition_timeout"] >= 6.0
+    assert fine_align["maximum_retries"] == 2
+    assert fine_align["retry_delay"] == 1.0
     assert fine_align["controller_frequency"] == 20.0
     assert fine_align["progress_log_interval"] == 1.0
     assert fine_align["translation_gain"] == 0.5
     assert fine_align["yaw_gain"] == 1.0
-    assert fine_align["translation_speed_min"] == 0.2
-    assert fine_align["translation_speed_max"] == 0.3
-    assert fine_align["angular_speed_min"] == 0.2
-    assert fine_align["angular_speed_max"] == 0.3
+    assert fine_align["translation_speed_min"] == 0.1
+    assert fine_align["translation_speed_max"] == 0.2
+    assert fine_align["angular_speed_min"] == 0.1
+    assert fine_align["angular_speed_max"] == 0.2
     assert fine_align["translation_yaw_stop"] == 0.3490658504
-    assert fine_align["x_position_tolerance"] == 0.05
-    assert fine_align["y_position_tolerance"] == 0.05
+    assert fine_align["x_position_tolerance"] == 0.08
+    assert fine_align["y_position_tolerance"] == 0.08
     assert "position_tolerance" not in fine_align
     assert fine_align["yaw_tolerance"] == 0.0872664626
     assert fine_align["settled_sample_count"] >= 3
     assert fine_align["allow_reverse_x"] is True
-    assert fine_align["reverse_capture_distance"] == 0.15
+    assert fine_align["reverse_capture_distance"] == 0.3
     assert "reacquisition_timeout" not in fine_align
 
     collision = configuration["collision_monitor"]["ros__parameters"]
@@ -420,8 +422,20 @@ def test_fine_alignment_logs_error_and_velocity_command_during_execution():
 
     assert "progress_log_interval" in fine_align_source
     assert "Fine-align progress:" in fine_align_source
+    assert "attempt=%zu/%zu" in fine_align_source
     assert "error_base=(x=%.3f m, y=%.3f m, yaw=%.3f rad)" in fine_align_source
     assert "command=(linear.x=%.3f m/s, linear.y=%.3f m/s, angular.z=%.3f rad/s)" in fine_align_source
+
+
+def test_fine_alignment_retries_only_recoverable_failures_with_a_new_target():
+    fine_align_source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "retryableFailure" in fine_align_source
+    assert "Fine-align retry:" in fine_align_source
+    assert "FineAlign::Feedback::REACQUIRING" in fine_align_source
+    assert "minimum_sequence = latestStableTargetSequence();" in fine_align_source
 
 
 def test_fine_alignment_logs_abort_context_before_terminating():

@@ -90,7 +90,18 @@ same planar speed range and accepts a target at most 0.15 m behind the robot.
 During physical alignment, the server writes an INFO-level progress log every
 `progress_log_interval` seconds (default: 1.0). It includes the current base-frame
 x/y/yaw error, commanded `linear.x`, `linear.y`, and `angular.z`, settling state,
-and stable-tag sequence number.
+stable-tag sequence number, and current attempt.
+
+Physical alignment retries recoverable failures up to `maximum_retries` times
+(default: 2, for three total attempts). Tag loss, capture-envelope drift, and
+approach timeout are retryable. Before another attempt, the server publishes the
+`REACQUIRING` action-feedback stage, commands zero velocity, waits `retry_delay`
+(default: 1.0 s), and requires a newer stable tag target. Measurement-only goals
+do not retry. Cancellation, a persistent Collision Monitor stop, Nav2 activation,
+invalid manipulation state, TF/controller safety failures, and ROS shutdown abort
+immediately. Every scheduled retry is logged with its failure code, reason,
+attempt count, delay, and required target sequence; the final abort log reports
+when all retries have been exhausted.
 
 Collision Monitor and the local/global costmaps use the tuned X2 robot
 footprint: -0.15 m to 0.15 m along x and +/-0.30 m along y in `base_link`.

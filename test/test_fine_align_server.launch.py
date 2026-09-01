@@ -27,9 +27,11 @@ def generate_test_description():
             {
                 "stable_sample_count": 1,
                 "settled_sample_count": 1,
-                "acquisition_timeout": 2.0,
+                "acquisition_timeout": 0.5,
                 "approach_timeout": 3.0,
                 "maximum_pose_age": 1.0,
+                "maximum_retries": 1,
+                "retry_delay": 0.1,
             },
         ],
         output="screen",
@@ -194,6 +196,43 @@ class TestFineAlignServer(unittest.TestCase):
                 )
             ),
             f"received commands: {self.commands!r}",
+        )
+        cancel = handle.cancel_goal_async()
+        self.assertTrue(self.spin_with_inputs_until(cancel.done))
+        result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertFalse(result.result().result.success)
+
+    def test_execution_retries_after_initial_tag_acquisition_failure(self):
+        # Ensure a target retained by another test cannot satisfy the first attempt.
+        time.sleep(1.1)
+        feedback_stages = []
+        goal = FineAlign.Goal()
+        goal.execute = True
+        sent = self.client.send_goal_async(
+            goal,
+            feedback_callback=lambda message: feedback_stages.append(
+                message.feedback.stage
+            ),
+        )
+        self.assertTrue(self.spin_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(handle.accepted)
+        self.assertTrue(
+            self.spin_until(
+                lambda: FineAlign.Feedback.REACQUIRING in feedback_stages,
+                timeout=2.0,
+            ),
+            f"feedback stages: {feedback_stages!r}",
+        )
+        self.assertTrue(
+            self.spin_with_inputs_until(
+                lambda: any(
+                    command.linear.x > 0.0 and command.linear.y > 0.0
+                    for command in self.commands
+                )
+            ),
+            f"received commands after retry: {self.commands!r}",
         )
         cancel = handle.cancel_goal_async()
         self.assertTrue(self.spin_with_inputs_until(cancel.done))
