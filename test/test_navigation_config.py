@@ -44,7 +44,7 @@ def test_navigation_velocity_footprint_and_costmap_settings():
 
     local_costmap = configuration["local_costmap"]["local_costmap"]["ros__parameters"]
     global_costmap = configuration["global_costmap"]["global_costmap"]["ros__parameters"]
-    expected_footprint = "[[0.50, 0.30], [0.50, -0.30], [-0.15, -0.30], [-0.15, 0.30]]"
+    expected_footprint = "[[0.15, 0.30], [0.15, -0.30], [-0.15, -0.30], [-0.15, 0.30]]"
     assert local_costmap["footprint"] == expected_footprint
     assert global_costmap["footprint"] == expected_footprint
     assert local_costmap["plugins"] == ["obstacle_layer", "inflation_layer"]
@@ -93,10 +93,10 @@ def test_navigation_velocity_footprint_and_costmap_settings():
 
     payload_filter = configuration["payload_cloud_filter"]["ros__parameters"]
     assert payload_filter == {
-        "min_x": -0.15,
+        "min_x": 0.20,
         "max_x": 0.50,
-        "min_y": -0.30,
-        "max_y": 0.30,
+        "min_y": -0.22,
+        "max_y": 0.22,
         "min_z": 0.03,
         "max_z": 0.56,
     }
@@ -367,17 +367,13 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     footprint_stop = collision["RobotFootprintStop"]
     assert footprint_stop["action_type"] == "stop"
     assert footprint_stop["points"] == [
-        0.50, 0.30, 0.50, -0.30, -0.15, -0.30, -0.15, 0.30,
+        0.15, 0.30, 0.15, -0.30, -0.15, -0.30, -0.15, 0.30,
     ]
     assert collision["chest_cloud"]["topic"] == "/scan_nav/payload_filtered_cloud"
 
     payload_filter = configuration["payload_cloud_filter"]["ros__parameters"]
-    safety_x = footprint_stop["points"][::2]
-    safety_y = footprint_stop["points"][1::2]
-    assert min(safety_x) <= payload_filter["min_x"]
-    assert max(safety_x) >= payload_filter["max_x"]
-    assert min(safety_y) <= payload_filter["min_y"]
-    assert max(safety_y) >= payload_filter["max_y"]
+    assert payload_filter["min_x"] > max(footprint_stop["points"][::2])
+    assert payload_filter["max_x"] > max(footprint_stop["points"][::2])
 
     launch_source = LAUNCH_FILE.read_text(encoding="utf-8")
     assert '"nav_cmd_topic"' in launch_source

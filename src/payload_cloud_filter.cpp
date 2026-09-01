@@ -19,10 +19,10 @@ public:
   PayloadCloudFilter()
   : Node("payload_cloud_filter")
   {
-    min_x_ = declare_parameter("min_x", -0.15);
+    min_x_ = declare_parameter("min_x", 0.20);
     max_x_ = declare_parameter("max_x", 0.50);
-    min_y_ = declare_parameter("min_y", -0.30);
-    max_y_ = declare_parameter("max_y", 0.30);
+    min_y_ = declare_parameter("min_y", -0.22);
+    max_y_ = declare_parameter("max_y", 0.22);
     min_z_ = declare_parameter("min_z", 0.03);
     max_z_ = declare_parameter("max_z", 0.56);
     const auto input = declare_parameter("input_topic", "/scan_nav/self_filtered_cloud");

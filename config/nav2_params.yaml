@@ -27,15 +27,15 @@ lidar_cloud_throttle:
     max_height: 0.30
     max_input_points: 40000
 
-# This 2-D envelope is also reserved by Collision Monitor and both costmaps.
-# Keep it identical to their footprint extents so returns from the carried
-# payload are never filtered outside the space Navigation2 reserves.
+# This is the carrying-box self-return envelope, not the robot footprint.
+# It removes LiDAR returns from the held box while ManipulationState is HOLDING.
+# Collision Monitor and Nav2 use their own tuned robot footprint below.
 payload_cloud_filter:
   ros__parameters:
-    min_x: -0.15
+    min_x: 0.20
     max_x: 0.50
-    min_y: -0.30
-    max_y: 0.30
+    min_y: -0.22
+    max_y: 0.22
     min_z: 0.03
     max_z: 0.56
 
@@ -173,7 +173,7 @@ collision_monitor:
     polygons: [RobotFootprintStop]
     RobotFootprintStop:
       type: polygon
-      points: [0.50, 0.30, 0.50, -0.30, -0.15, -0.30, -0.15, 0.30]
+      points: [0.15, 0.30, 0.15, -0.30, -0.15, -0.30, -0.15, 0.30]
       action_type: stop
       max_points: 3
       visualize: true
@@ -199,7 +199,7 @@ local_costmap:
       width: 6
       height: 6
       resolution: 0.05
-      footprint: "[[0.50, 0.30], [0.50, -0.30], [-0.15, -0.30], [-0.15, 0.30]]"
+      footprint: "[[0.15, 0.30], [0.15, -0.30], [-0.15, -0.30], [-0.15, 0.30]]"
       transform_tolerance: 5.0
       plugins: [obstacle_layer, inflation_layer]
       obstacle_layer:
@@ -237,7 +237,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       resolution: 0.05
-      footprint: "[[0.50, 0.30], [0.50, -0.30], [-0.15, -0.30], [-0.15, 0.30]]"
+      footprint: "[[0.15, 0.30], [0.15, -0.30], [-0.15, -0.30], [-0.15, 0.30]]"
       transform_tolerance: 5.0
       track_unknown_space: true
       plugins: [static_layer, obstacle_layer, inflation_layer]

@@ -92,23 +92,25 @@ During physical alignment, the server writes an INFO-level progress log every
 x/y/yaw error, commanded `linear.x`, `linear.y`, and `angular.z`, settling state,
 and stable-tag sequence number.
 
-Collision Monitor and the local/global costmaps reserve the same combined X2
-base and carried-payload envelope: -0.15 m to 0.50 m along x and +/-0.30 m
-along y in `base_link`. The payload cloud filter removes returns only inside
-that already-reserved envelope while the manipulation state is HOLDING. The
-parameter regression checks that the filter can never extend beyond this
-safety footprint. Revise the filter bounds and all three footprints together
-before using a different payload configuration.
+Collision Monitor and the local/global costmaps use the tuned X2 robot
+footprint: -0.15 m to 0.15 m along x and +/-0.30 m along y in `base_link`.
+This is the robot-body collision envelope; it is independent of the carrying
+box geometry.
+
+While `HOLDING`, `payload_cloud_filter` removes only self-returns from the
+carrying-box envelope: 0.20 m to 0.50 m along x and +/-0.22 m along y in
+`base_link` (with the configured vertical bounds). It prevents the held box
+from appearing as a LiDAR obstacle; it does **not** expand the robot footprint
+or reserve the carrying-box volume for collision checking. Recalibrate the
+filter whenever the box dimensions or carry pose changes, and configure a
+separate payload collision envelope if the workflow needs collision protection
+for the held box.
 
 `fine_align_server.ros__parameters` configures the tag admission gate, target,
 capture envelope, controller, settling criteria, and timeouts. A stable target
 may be propagated through odometry for at most 2.5 seconds without a fresh tag.
 The previous OpenNav-based prototype is preserved on the local
 `archive/opennav-table-docking` branch.
-
-While `HOLDING`, `payload_cloud_filter` removes only the configured carry envelope
-from the costmap and collision-monitor cloud. Recalibrate that envelope whenever
-box dimensions or the adaptive carry-pose range changes.
 
 Override the bridge transport or watchdog only when the matching RoboJuDo
 receiver configuration is changed:
