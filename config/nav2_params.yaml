@@ -146,6 +146,12 @@ fine_align_server:
     odometry_timeout: 0.5
     controller_frequency: 20.0
     progress_log_interval: 1.0
+    undock_distance: 0.3
+    undock_timeout: 10.0
+    undock_translation_speed_min: 0.1
+    undock_translation_speed_max: 0.1
+    undock_angular_speed_min: 0.1
+    undock_angular_speed_max: 0.1
     translation_gain: 0.5
     yaw_gain: 1.0
     translation_speed_min: 0.1

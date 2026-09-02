@@ -1,20 +1,23 @@
 import time
 import unittest
+from math import cos, sin
 from pathlib import Path
 
 import launch
 import launch_testing.asserts
 import launch_testing.actions
 import rclpy
+from action_msgs.msg import GoalStatus, GoalStatusArray
 from agibot_x2_manipulation_msgs.msg import ManipulationState
 from apriltag_msgs.msg import AprilTagDetection, AprilTagDetectionArray
 from geometry_msgs.msg import TransformStamped, Twist
 from launch_ros.actions import Node
 from nav_msgs.msg import Odometry
+from nav2_msgs.msg import CollisionMonitorState
 from rclpy.action import ActionClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from tf2_ros import TransformBroadcaster
-from x2_navigation.action import FineAlign
+from x2_navigation.action import FineAlign, Undock
 
 
 def generate_test_description():
@@ -32,6 +35,12 @@ def generate_test_description():
                 "maximum_pose_age": 1.0,
                 "maximum_retries": 1,
                 "retry_delay": 0.1,
+                "undock_distance": 0.1,
+                "undock_timeout": 3.0,
+                "undock_translation_speed_min": 0.1,
+                "undock_translation_speed_max": 0.1,
+                "undock_angular_speed_min": 0.1,
+                "undock_angular_speed_max": 0.1,
             },
         ],
         output="screen",
@@ -71,15 +80,32 @@ class TestFineAlignServer(unittest.TestCase):
         )
         self.odometry = self.node.create_publisher(Odometry, "/odom", sensor_qos)
         self.commands = []
+        self.odom_x = 0.0
+        self.odom_y = 0.0
+        self.odom_linear_velocity = 0.0
+        self.odom_angular_velocity = 0.0
+        self.odom_yaw = 0.0
+        self.manipulation_state = ManipulationState.EMPTY
+        self.nav_active = False
+        self.collision_stopped = False
         self.command_subscription = self.node.create_subscription(
             Twist, "/cmd_vel_raw", self.commands.append, 10
         )
+        self.nav_status = self.node.create_publisher(
+            GoalStatusArray, "/navigate_to_pose/_action/status", 10
+        )
+        self.collision_state = self.node.create_publisher(
+            CollisionMonitorState, "/collision_monitor_state", 10
+        )
         self.transforms = TransformBroadcaster(self.node)
         self.client = ActionClient(self.node, FineAlign, "/fine_align")
+        self.undock_client = ActionClient(self.node, Undock, "/undock")
         self.assertTrue(self.client.wait_for_server(timeout_sec=5.0))
+        self.assertTrue(self.undock_client.wait_for_server(timeout_sec=5.0))
 
     def tearDown(self):
         self.client.destroy()
+        self.undock_client.destroy()
         self.node.destroy_node()
 
     def publish_inputs(self):
@@ -115,12 +141,35 @@ class TestFineAlignServer(unittest.TestCase):
         self.detections.publish(message)
 
         state = ManipulationState()
-        state.state = ManipulationState.EMPTY
+        state.state = self.manipulation_state
         self.states.publish(state)
 
         odometry = Odometry()
         odometry.header.stamp = stamp
+        odometry.header.frame_id = "odom"
+        odometry.child_frame_id = "base_link"
+        odometry.pose.pose.position.x = self.odom_x
+        odometry.pose.pose.position.y = self.odom_y
+        odometry.pose.pose.orientation.z = sin(self.odom_yaw / 2.0)
+        odometry.pose.pose.orientation.w = cos(self.odom_yaw / 2.0)
+        odometry.twist.twist.linear.x = self.odom_linear_velocity
+        odometry.twist.twist.angular.z = self.odom_angular_velocity
         self.odometry.publish(odometry)
+
+        nav_status = GoalStatusArray()
+        if self.nav_active:
+            active = GoalStatus()
+            active.status = GoalStatus.STATUS_EXECUTING
+            nav_status.status_list = [active]
+        self.nav_status.publish(nav_status)
+
+        collision = CollisionMonitorState()
+        collision.action_type = (
+            CollisionMonitorState.STOP
+            if self.collision_stopped
+            else CollisionMonitorState.DO_NOTHING
+        )
+        self.collision_state.publish(collision)
 
     def spin_with_inputs_until(self, predicate, timeout=5.0):
         deadline = time.monotonic() + timeout
@@ -239,6 +288,140 @@ class TestFineAlignServer(unittest.TestCase):
         result = handle.get_result_async()
         self.assertTrue(self.spin_with_inputs_until(result.done))
         self.assertFalse(result.result().result.success)
+
+    def test_undock_commands_reverse_x_and_completes_from_odometry(self):
+        self.warm_up_inputs()
+        feedback = []
+        sent = self.undock_client.send_goal_async(
+            Undock.Goal(),
+            feedback_callback=lambda message: feedback.append(message.feedback),
+        )
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(handle.accepted)
+        self.assertTrue(
+            self.spin_with_inputs_until(
+                lambda: any(command.linear.x < 0.0 for command in self.commands)
+            ),
+            f"received commands: {self.commands!r}",
+        )
+        reverse_commands = [command for command in self.commands if command.linear.x < 0.0]
+        self.assertTrue(reverse_commands)
+        self.assertTrue(
+            all(
+                command.linear.y == 0.0 and command.angular.z == 0.0
+                for command in reverse_commands
+            )
+        )
+
+        self.odom_x = -0.11
+        self.odom_linear_velocity = 0.0
+        result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        action_result = result.result().result
+        self.assertTrue(action_result.success, action_result.message)
+        self.assertEqual(action_result.error_code, Undock.Result.SUCCESS)
+        self.assertGreaterEqual(action_result.distance_traveled, 0.1)
+        self.assertTrue(any(item.stage == Undock.Feedback.MOVING for item in feedback))
+        self.assertTrue(any(item.stage == Undock.Feedback.SETTLING for item in feedback))
+
+    def test_undock_corrects_lateral_and_yaw_drift(self):
+        self.warm_up_inputs()
+        sent = self.undock_client.send_goal_async(Undock.Goal())
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(handle.accepted)
+        self.assertTrue(
+            self.spin_with_inputs_until(
+                lambda: any(command.linear.x < 0.0 for command in self.commands)
+            )
+        )
+
+        self.odom_x = -0.02
+        self.odom_y = 0.10
+        self.odom_yaw = 0.20
+        self.assertTrue(
+            self.spin_with_inputs_until(
+                lambda: any(
+                    command.linear.y < 0.0 and command.angular.z < 0.0
+                    for command in self.commands
+                )
+            ),
+            f"received commands: {self.commands!r}",
+        )
+        cancel = handle.cancel_goal_async()
+        self.assertTrue(self.spin_with_inputs_until(cancel.done))
+        result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+
+    def test_undock_cancellation_stops_motion(self):
+        self.warm_up_inputs()
+        sent = self.undock_client.send_goal_async(Undock.Goal())
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(handle.accepted)
+        self.assertTrue(
+            self.spin_with_inputs_until(
+                lambda: any(command.linear.x < 0.0 for command in self.commands)
+            )
+        )
+        cancel = handle.cancel_goal_async()
+        self.assertTrue(self.spin_with_inputs_until(cancel.done))
+        result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertEqual(result.result().result.error_code, Undock.Result.CANCELED)
+        self.assertTrue(self.spin_with_inputs_until(lambda: bool(self.commands)))
+        self.assertEqual(self.commands[-1], Twist())
+
+    def test_undock_rejects_invalid_manipulation_state(self):
+        self.manipulation_state = ManipulationState.RECOVERY_REQUIRED
+        self.warm_up_inputs()
+        sent = self.undock_client.send_goal_async(Undock.Goal())
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        result = sent.result().get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertEqual(result.result().result.error_code, Undock.Result.INVALID_STATE)
+
+    def test_undock_aborts_when_nav2_is_active(self):
+        self.nav_active = True
+        self.warm_up_inputs()
+        sent = self.undock_client.send_goal_async(Undock.Goal())
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        result = sent.result().get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertEqual(result.result().result.error_code, Undock.Result.NAVIGATION_ACTIVE)
+
+    def test_undock_aborts_for_persistent_collision_stop(self):
+        self.collision_stopped = True
+        self.warm_up_inputs(duration=1.1)
+        sent = self.undock_client.send_goal_async(Undock.Goal())
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        result = sent.result().get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertEqual(result.result().result.error_code, Undock.Result.COLLISION_STOPPED)
+
+    def test_undock_requires_fresh_odometry(self):
+        self.warm_up_inputs()
+        time.sleep(0.6)
+        sent = self.undock_client.send_goal_async(Undock.Goal())
+        self.assertTrue(self.spin_until(sent.done))
+        result = sent.result().get_result_async()
+        self.assertTrue(self.spin_until(result.done))
+        self.assertEqual(result.result().result.error_code, Undock.Result.ODOMETRY_UNAVAILABLE)
+
+    def test_docking_and_undocking_are_mutually_exclusive(self):
+        self.warm_up_inputs()
+        undock_sent = self.undock_client.send_goal_async(Undock.Goal())
+        self.assertTrue(self.spin_with_inputs_until(undock_sent.done))
+        undock_handle = undock_sent.result()
+        self.assertTrue(undock_handle.accepted)
+        fine_sent = self.client.send_goal_async(FineAlign.Goal())
+        self.assertTrue(self.spin_with_inputs_until(fine_sent.done))
+        self.assertFalse(fine_sent.result().accepted)
+        cancel = undock_handle.cancel_goal_async()
+        self.assertTrue(self.spin_with_inputs_until(cancel.done))
+        result = undock_handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
 
 
 @launch_testing.post_shutdown_test()

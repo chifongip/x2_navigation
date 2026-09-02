@@ -31,6 +31,7 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <x2_navigation/action/fine_align.hpp>
+#include <x2_navigation/action/undock.hpp>
 
 namespace x2_navigation
 {
@@ -42,6 +43,8 @@ class FineAlignServer : public rclcpp::Node
 public:
   using FineAlign = x2_navigation::action::FineAlign;
   using GoalHandle = rclcpp_action::ServerGoalHandle<FineAlign>;
+  using Undock = x2_navigation::action::Undock;
+  using UndockGoalHandle = rclcpp_action::ServerGoalHandle<Undock>;
 
   FineAlignServer()
   : Node("fine_align_server"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
@@ -81,6 +84,8 @@ public:
     settled_sample_count_ = static_cast<std::size_t>(std::max(1L, settled_sample_count));
     const double controller_frequency = declare_parameter("controller_frequency", 20.0);
     progress_log_interval_ = declare_parameter("progress_log_interval", 1.0);
+    undock_distance_ = declare_parameter("undock_distance", 0.30);
+    undock_timeout_ = declare_parameter("undock_timeout", 10.0);
 
     controller_config_.translation_gain = declare_parameter("translation_gain", 0.5);
     controller_config_.yaw_gain = declare_parameter("yaw_gain", 1.0);
@@ -95,7 +100,19 @@ public:
     controller_config_.yaw_tolerance = declare_parameter("yaw_tolerance", 0.0872664626);
     controller_config_.allow_reverse_x = declare_parameter("allow_reverse_x", false);
 
+    undock_controller_config_ = controller_config_;
+    undock_controller_config_.translation_speed_min = declare_parameter(
+      "undock_translation_speed_min", 0.10);
+    undock_controller_config_.translation_speed_max = declare_parameter(
+      "undock_translation_speed_max", 0.10);
+    undock_controller_config_.angular_speed_min = declare_parameter(
+      "undock_angular_speed_min", 0.10);
+    undock_controller_config_.angular_speed_max = declare_parameter(
+      "undock_angular_speed_max", 0.10);
+    undock_controller_config_.allow_reverse_x = true;
+
     if (!validHolonomicFineAlignConfig(controller_config_) ||
+      !validHolonomicFineAlignConfig(undock_controller_config_) ||
       !std::isfinite(controller_frequency) || controller_frequency <= 0.0 ||
       !std::isfinite(maximum_pose_age_) || maximum_pose_age_ <= 0.0 ||
       !std::isfinite(reverse_capture_distance_) || reverse_capture_distance_ <= 0.0 ||
@@ -103,9 +120,13 @@ public:
       !std::isfinite(progress_log_interval_) || progress_log_interval_ <= 0.0 ||
       !std::isfinite(odometry_timeout_) || odometry_timeout_ <= 0.0 ||
       !std::isfinite(settled_linear_velocity_) || settled_linear_velocity_ < 0.0 ||
-      !std::isfinite(settled_angular_velocity_) || settled_angular_velocity_ < 0.0)
+      !std::isfinite(settled_angular_velocity_) || settled_angular_velocity_ < 0.0 ||
+      !std::isfinite(undock_distance_) || undock_distance_ <= 0.0 ||
+      undock_controller_config_.translation_speed_max > 0.5 ||
+      undock_controller_config_.angular_speed_max > 1.0 ||
+      !std::isfinite(undock_timeout_) || undock_timeout_ <= 0.0)
     {
-      throw std::invalid_argument("invalid fine-align controller configuration");
+      throw std::invalid_argument("invalid fine-align or undock controller configuration");
     }
     controller_period_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / controller_frequency));
@@ -130,6 +151,15 @@ public:
         std::lock_guard<std::mutex> lock(odometry_mutex_);
         linear_velocity_ = std::hypot(message->twist.twist.linear.x, message->twist.twist.linear.y);
         angular_velocity_ = std::abs(message->twist.twist.angular.z);
+        odometry_x_ = message->pose.pose.position.x;
+        odometry_y_ = message->pose.pose.position.y;
+        const auto & orientation = message->pose.pose.orientation;
+        const double yaw_sine = 2.0 *
+          (orientation.w * orientation.z + orientation.x * orientation.y);
+        const double yaw_cosine = 1.0 - 2.0 *
+          (orientation.y * orientation.y + orientation.z * orientation.z);
+        odometry_yaw_ = std::atan2(yaw_sine, yaw_cosine);
+        ++odometry_sequence_;
         odometry_received_at_ = std::chrono::steady_clock::now();
       });
     nav_status_sub_ = create_subscription<action_msgs::msg::GoalStatusArray>(
@@ -179,6 +209,18 @@ public:
       [this](std::shared_ptr<GoalHandle> handle) {
         std::thread(&FineAlignServer::execute, this, std::move(handle)).detach();
       });
+    undock_server_ = rclcpp_action::create_server<Undock>(
+      this, "/undock",
+      [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const Undock::Goal>) {
+        bool expected = false;
+        return operation_active_.compare_exchange_strong(expected, true) ?
+               rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
+               rclcpp_action::GoalResponse::REJECT;
+      },
+      [](std::shared_ptr<UndockGoalHandle>) {return rclcpp_action::CancelResponse::ACCEPT;},
+      [this](std::shared_ptr<UndockGoalHandle> handle) {
+        std::thread(&FineAlignServer::executeUndock, this, std::move(handle)).detach();
+      });
   }
 
 private:
@@ -186,6 +228,17 @@ private:
   {
     uint16_t code;
     std::string message;
+  };
+
+  struct OdometrySnapshot
+  {
+    double x;
+    double y;
+    double yaw;
+    double linear_velocity;
+    double angular_velocity;
+    std::uint64_t sequence;
+    double age;
   };
 
   void onDetections(const apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message)
@@ -577,6 +630,236 @@ private:
     }
   }
 
+  bool odometrySnapshot(OdometrySnapshot & snapshot, bool require_fresh = true) const
+  {
+    std::lock_guard<std::mutex> lock(odometry_mutex_);
+    if (!odometry_received_at_) {
+      return false;
+    }
+    snapshot = {
+      odometry_x_, odometry_y_, odometry_yaw_, linear_velocity_, angular_velocity_,
+      odometry_sequence_,
+      std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - *odometry_received_at_).count()};
+    const bool finite = std::isfinite(snapshot.x) && std::isfinite(snapshot.y) &&
+      std::isfinite(snapshot.yaw) && std::isfinite(snapshot.linear_velocity) &&
+      std::isfinite(snapshot.angular_velocity);
+    return finite && (!require_fresh || snapshot.age <= odometry_timeout_);
+  }
+
+  uint8_t currentManipulationState() const
+  {
+    std::lock_guard<std::mutex> lock(measurement_mutex_);
+    return manipulation_state_;
+  }
+
+  void logUndockAbort(
+    const Undock::Result & result, uint16_t code, const std::string & message) const
+  {
+    constexpr double unavailable = std::numeric_limits<double>::quiet_NaN();
+    OdometrySnapshot odometry{};
+    const bool odometry_available = odometrySnapshot(odometry, false);
+    bool collision_stopped = false;
+    double collision_stop_age = unavailable;
+    {
+      std::lock_guard<std::mutex> lock(collision_mutex_);
+      collision_stopped = collision_stopped_;
+      if (collision_stop_since_) {
+        collision_stop_age = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - *collision_stop_since_).count();
+      }
+    }
+    RCLCPP_ERROR(
+      get_logger(),
+      "Undock action abort: code=%u; reason='%s'; distance=(traveled=%.3f m, target=%.3f m); "
+      "manipulation_state=(result=%u, current=%u); nav_active=%s; "
+      "collision_stopped=%s (age=%.3f s); odometry_%s=(age=%.3f s, x=%.3f m, y=%.3f m, "
+      "yaw=%.3f rad, linear=%.3f m/s, angular=%.3f rad/s)",
+      static_cast<unsigned int>(code), message.c_str(), result.distance_traveled,
+      undock_distance_, static_cast<unsigned int>(result.manipulation_state),
+      static_cast<unsigned int>(currentManipulationState()), nav_active_.load() ? "true" : "false",
+      collision_stopped ? "true" : "false", collision_stop_age,
+      odometry_available ? "available" : "unavailable",
+      odometry_available ? odometry.age : unavailable,
+      odometry_available ? odometry.x : unavailable,
+      odometry_available ? odometry.y : unavailable,
+      odometry_available ? odometry.yaw : unavailable,
+      odometry_available ? odometry.linear_velocity : unavailable,
+      odometry_available ? odometry.angular_velocity : unavailable);
+  }
+
+  void finishUndock(
+    const std::shared_ptr<UndockGoalHandle> & handle,
+    const std::shared_ptr<Undock::Result> & result, uint16_t code,
+    const std::string & message)
+  {
+    stopAlignment();
+    result->success = false;
+    result->error_code = code;
+    result->message = message;
+    if (handle->is_canceling()) {
+      result->error_code = Undock::Result::CANCELED;
+      result->message = "undocking canceled";
+      handle->canceled(result);
+    } else {
+      logUndockAbort(*result, code, message);
+      handle->abort(result);
+    }
+    operation_active_.store(false);
+  }
+
+  void executeUndock(std::shared_ptr<UndockGoalHandle> handle)
+  {
+    auto result = std::make_shared<Undock::Result>();
+    result->manipulation_state = currentManipulationState();
+
+    auto validating = std::make_shared<Undock::Feedback>();
+    validating->stage = Undock::Feedback::VALIDATING;
+    validating->distance_remaining = undock_distance_;
+    handle->publish_feedback(validating);
+
+    if (nav_active_.load()) {
+      finishUndock(handle, result, Undock::Result::NAVIGATION_ACTIVE, "Nav2 is active");
+      return;
+    }
+    if (!validState(result->manipulation_state)) {
+      finishUndock(
+        handle, result, Undock::Result::INVALID_STATE,
+        "manipulation state is not EMPTY or HOLDING");
+      return;
+    }
+    OdometrySnapshot initial{};
+    if (!odometrySnapshot(initial)) {
+      finishUndock(
+        handle, result, Undock::Result::ODOMETRY_UNAVAILABLE,
+        "fresh finite odometry is unavailable");
+      return;
+    }
+
+    alignment_active_.store(true);
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(undock_timeout_);
+    const auto progress_log_period = std::max(
+      controller_period_, std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(progress_log_interval_)));
+    auto next_progress_log = std::chrono::steady_clock::time_point::min();
+    std::uint64_t settled_sequence = initial.sequence;
+    std::size_t settled_samples = 0;
+    const double target_x = initial.x - undock_distance_ * std::cos(initial.yaw);
+    const double target_y = initial.y - undock_distance_ * std::sin(initial.yaw);
+
+    while (rclcpp::ok()) {
+      if (handle->is_canceling()) {
+        finishUndock(handle, result, Undock::Result::CANCELED, "undocking canceled");
+        return;
+      }
+      if (nav_active_.load()) {
+        finishUndock(
+          handle, result, Undock::Result::NAVIGATION_ACTIVE, "Nav2 became active");
+        return;
+      }
+      if (collisionStopTimedOut()) {
+        finishUndock(
+          handle, result, Undock::Result::COLLISION_STOPPED,
+          "collision monitor stop persisted");
+        return;
+      }
+      if (std::chrono::steady_clock::now() > deadline) {
+        finishUndock(handle, result, Undock::Result::UNDOCK_TIMEOUT, "undocking timed out");
+        return;
+      }
+      result->manipulation_state = currentManipulationState();
+      if (!validState(result->manipulation_state)) {
+        finishUndock(
+          handle, result, Undock::Result::INVALID_STATE,
+          "manipulation state became invalid during undocking");
+        return;
+      }
+
+      OdometrySnapshot current{};
+      if (!odometrySnapshot(current)) {
+        finishUndock(
+          handle, result, Undock::Result::ODOMETRY_UNAVAILABLE,
+          "odometry became stale or non-finite during undocking");
+        return;
+      }
+      const double delta_x = current.x - initial.x;
+      const double delta_y = current.y - initial.y;
+      const double projected_backward =
+        -(delta_x * std::cos(initial.yaw) + delta_y * std::sin(initial.yaw));
+      result->distance_traveled = std::max(0.0, projected_backward);
+
+      const double target_delta_x = target_x - current.x;
+      const double target_delta_y = target_y - current.y;
+      const PlanarError error{
+        std::cos(current.yaw) * target_delta_x + std::sin(current.yaw) * target_delta_y,
+        -std::sin(current.yaw) * target_delta_x + std::cos(current.yaw) * target_delta_y,
+        wrapAngle(initial.yaw - current.yaw)};
+      const bool target_reached = fineAlignAtGoal(error, undock_controller_config_);
+
+      geometry_msgs::msg::Twist command;
+      if (!target_reached) {
+        const auto selected_command = holonomicFineAlignCommand(error, undock_controller_config_);
+        if (!selected_command) {
+          finishUndock(
+            handle, result, Undock::Result::SAFETY_ABORT,
+            "holonomic controller rejected the undocking error");
+          return;
+        }
+        command = *selected_command;
+        settled_samples = 0;
+      } else if (current.sequence != settled_sequence) {
+        settled_sequence = current.sequence;
+        const bool settled = current.linear_velocity <= settled_linear_velocity_ &&
+          current.angular_velocity <= settled_angular_velocity_;
+        settled_samples = settled ? settled_samples + 1U : 0U;
+      }
+      {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        alignment_command_ = command;
+        alignment_command_time_ = std::chrono::steady_clock::now();
+      }
+
+      const double remaining = std::max(0.0, undock_distance_ - result->distance_traveled);
+      const auto current_steady_time = std::chrono::steady_clock::now();
+      if (current_steady_time >= next_progress_log) {
+        RCLCPP_INFO(
+          get_logger(),
+          "Undock progress: distance=(traveled=%.3f m, remaining=%.3f m, target=%.3f m); "
+          "command=(linear.x=%.3f m/s, linear.y=%.3f m/s, angular.z=%.3f rad/s); "
+          "odometry=(linear=%.3f m/s, angular=%.3f rad/s); stage=%s; settled_samples=%zu/%zu",
+          result->distance_traveled, remaining, undock_distance_, command.linear.x,
+          command.linear.y, command.angular.z, current.linear_velocity, current.angular_velocity,
+          target_reached ? "settling" : "moving", settled_samples, settled_sample_count_);
+        next_progress_log = current_steady_time + progress_log_period;
+      }
+
+      auto feedback = std::make_shared<Undock::Feedback>();
+      feedback->stage = target_reached ? Undock::Feedback::SETTLING : Undock::Feedback::MOVING;
+      feedback->distance_traveled = result->distance_traveled;
+      feedback->distance_remaining = remaining;
+      feedback->commanded_speed = command.linear.x;
+      feedback->commanded_lateral_speed = command.linear.y;
+      feedback->commanded_yaw_speed = command.angular.z;
+      feedback->progress = static_cast<float>(
+        std::min(1.0, result->distance_traveled / undock_distance_));
+      handle->publish_feedback(feedback);
+
+      if (target_reached && settled_samples >= settled_sample_count_) {
+        stopAlignment();
+        result->success = true;
+        result->error_code = Undock::Result::SUCCESS;
+        result->message = "undocking succeeded";
+        handle->succeed(result);
+        operation_active_.store(false);
+        return;
+      }
+      std::this_thread::sleep_for(controller_period_);
+    }
+    finishUndock(
+      handle, result, Undock::Result::SAFETY_ABORT, "ROS shutdown interrupted undocking");
+  }
+
   void stopAlignment()
   {
     alignment_active_.store(false);
@@ -723,6 +1006,7 @@ private:
   }
 
   rclcpp_action::Server<FineAlign>::SharedPtr server_;
+  rclcpp_action::Server<Undock>::SharedPtr undock_server_;
   rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_sub_;
   rclcpp::Subscription<agibot_x2_manipulation_msgs::msg::ManipulationState>::SharedPtr state_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
@@ -739,6 +1023,7 @@ private:
   rclcpp::Time last_sample_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time stable_target_stamp_{0, 0, RCL_ROS_TIME};
   std::uint64_t stable_target_sequence_{0};
+  std::uint64_t odometry_sequence_{0};
   uint8_t manipulation_state_{agibot_x2_manipulation_msgs::msg::ManipulationState::UNKNOWN};
   geometry_msgs::msg::Twist nav_command_, alignment_command_;
   std::optional<std::chrono::steady_clock::time_point> nav_command_time_;
@@ -750,7 +1035,7 @@ private:
   std::string fixed_frame_, base_frame_, tag_frame_;
   int tag_id_{9};
   std::size_t stable_sample_count_{3}, settled_sample_count_{3}, maximum_retries_{2};
-  HolonomicFineAlignConfig controller_config_;
+  HolonomicFineAlignConfig controller_config_, undock_controller_config_;
   std::chrono::nanoseconds controller_period_{50ms};
   double minimum_decision_margin_, standoff_, lateral_offset_, yaw_offset_;
   double maximum_pose_age_, maximum_sample_gap_, maximum_position_spread_, maximum_angular_spread_;
@@ -758,6 +1043,8 @@ private:
   double acquisition_timeout_, approach_timeout_, retry_delay_, command_timeout_;
   double collision_stop_timeout_;
   double odometry_timeout_, settled_linear_velocity_, settled_angular_velocity_, progress_log_interval_;
+  double undock_distance_, undock_timeout_;
+  double odometry_x_{0.0}, odometry_y_{0.0}, odometry_yaw_{0.0};
   double linear_velocity_{0.0}, angular_velocity_{0.0};
 };
 

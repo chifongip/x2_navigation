@@ -346,6 +346,12 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     assert fine_align["retry_delay"] == 1.0
     assert fine_align["controller_frequency"] == 20.0
     assert fine_align["progress_log_interval"] == 1.0
+    assert fine_align["undock_distance"] == 0.3
+    assert fine_align["undock_timeout"] == 10.0
+    assert fine_align["undock_translation_speed_min"] == 0.1
+    assert fine_align["undock_translation_speed_max"] == 0.1
+    assert fine_align["undock_angular_speed_min"] == 0.1
+    assert fine_align["undock_angular_speed_max"] == 0.1
     assert fine_align["translation_gain"] == 0.5
     assert fine_align["yaw_gain"] == 1.0
     assert fine_align["translation_speed_min"] == 0.1
@@ -446,9 +452,28 @@ def test_fine_alignment_logs_abort_context_before_terminating():
     assert "Fine-align action abort:" in fine_align_source
     assert "stable_target_%s" in fine_align_source
     assert "odometry_%s" in fine_align_source
-    assert fine_align_source.index("logAbortDiagnostic(handle, *result, code, message);") < (
-        fine_align_source.index("handle->abort(result);")
+    finish_start = fine_align_source.index("  void finish(\n")
+    finish_end = fine_align_source.index("  void finishCanceledOrFailed(\n", finish_start)
+    finish_source = fine_align_source[finish_start:finish_end]
+    assert finish_source.index("logAbortDiagnostic(handle, *result, code, message);") < (
+        finish_source.index("handle->abort(result);")
     )
+
+
+def test_undocking_uses_holonomic_drift_correction_with_diagnostics():
+    package_root = CONFIG_FILE.parents[1]
+    source = (package_root / "src" / "fine_align_server.cpp").read_text(encoding="utf-8")
+    action = (package_root / "action" / "Undock.action").read_text(encoding="utf-8")
+
+    assert 'this, "/undock"' in source
+    assert "holonomicFineAlignCommand(error, undock_controller_config_)" in source
+    assert "fineAlignAtGoal(error, undock_controller_config_)" in source
+    assert "undock_controller_config_ = controller_config_;" in source
+    assert "undock_controller_config_.allow_reverse_x = true;" in source
+    assert "Undock progress:" in source
+    assert "Undock action abort:" in source
+    assert "distance_traveled" in action
+    assert "distance_remaining" in action
 
 
 def test_navigation_runtime_dependencies_and_resources_are_packaged():

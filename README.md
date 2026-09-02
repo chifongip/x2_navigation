@@ -78,6 +78,26 @@ ros2 action send_goal /fine_align x2_navigation/action/FineAlign \
   "{execute: true}" --feedback
 ```
 
+Undocking is a separate fixed-profile physical operation exposed as
+`/undock` (`x2_navigation/action/Undock`). It does not require a visible tag.
+The server snapshots the current odometry pose and creates a fixed target
+`undock_distance` behind it. The holonomic controller drives toward that target,
+using negative `linear.x` for the retreat while correcting lateral and yaw drift
+with `linear.y` and `angular.z`. The provided configuration retreats 0.30 m with
+a 10.0 s timeout. Independent undocking translation and angular minimum/maximum
+speed parameters all default to 0.10; the controller deliberately reuses the
+existing `x_position_tolerance`, `y_position_tolerance`, and `yaw_tolerance`.
+
+```bash
+ros2 action send_goal /undock x2_navigation/action/Undock "{}" --feedback
+```
+
+Docking and undocking are mutually exclusive and share the same command mux,
+Collision Monitor path, watchdog, manipulation-state gate, Nav2-idle gate, and
+odometry settling criteria. Undocking has no automatic retry. Cancellation,
+persistent collision stop, Nav2 activation, invalid manipulation state, stale
+odometry, timeout, and ROS shutdown all command zero velocity before termination.
+
 Nav2 publishes `/cmd_vel_nav`; the fine-align server selects either navigation or
 its internal alignment command. Planar alignment speed is bounded by vector
 magnitude to 0.20-0.30 m/s, preserving the x/y direction, and yaw is bounded to
