@@ -88,6 +88,7 @@ class TestFineAlignServer(unittest.TestCase):
         self.manipulation_state = ManipulationState.EMPTY
         self.nav_active = False
         self.collision_stopped = False
+        self.invalid_tag_orientation = False
         self.command_subscription = self.node.create_subscription(
             Twist, "/cmd_vel_raw", self.commands.append, 10
         )
@@ -121,6 +122,12 @@ class TestFineAlignServer(unittest.TestCase):
         tag.transform.rotation.y = 0.5
         tag.transform.rotation.z = 0.5
         tag.transform.rotation.w = 0.5
+        if self.invalid_tag_orientation:
+            # Identity rotation puts tag +Z vertically, invalid for table docking.
+            tag.transform.rotation.x = 0.0
+            tag.transform.rotation.y = 0.0
+            tag.transform.rotation.z = 0.0
+            tag.transform.rotation.w = 1.0
 
         base = TransformStamped()
         base.header.stamp = stamp
@@ -228,6 +235,34 @@ class TestFineAlignServer(unittest.TestCase):
         self.assertFalse(action_result.success)
         self.assertEqual(action_result.error_code, FineAlign.Result.NO_STABLE_TAG)
         self.assertIn("no stable", action_result.message)
+
+    def test_invalid_tag_aborts_without_crashing_and_recovers(self):
+        self.warm_up_inputs()
+        self.invalid_tag_orientation = True
+        # Publish enough invalid observations to replace the TF and reject the cache.
+        self.warm_up_inputs(duration=0.3)
+        goal = FineAlign.Goal()
+        goal.execute = False
+        sent = self.client.send_goal_async(goal)
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(handle.accepted)
+        result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertEqual(result.result().status, GoalStatus.STATUS_ABORTED)
+        self.assertEqual(result.result().result.error_code, FineAlign.Result.NO_STABLE_TAG)
+        self.assertFalse(any(command != Twist() for command in self.commands))
+
+        self.invalid_tag_orientation = False
+        self.warm_up_inputs()
+        sent = self.client.send_goal_async(goal)
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(handle.accepted)
+        result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertEqual(result.result().status, GoalStatus.STATUS_SUCCEEDED)
+        self.assertTrue(result.result().result.success)
 
     def test_execution_emits_coupled_planar_command_and_cancels_cleanly(self):
         self.warm_up_inputs()

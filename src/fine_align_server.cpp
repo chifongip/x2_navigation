@@ -299,6 +299,18 @@ private:
     } catch (const tf2::TransformException & error) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000, "Fine-align tag transform unavailable: %s", error.what());
+    } catch (const std::exception & error) {
+      // A rejected observation must not leave a previous target available for motion.
+      {
+        std::lock_guard<std::mutex> lock(measurement_mutex_);
+        samples_.clear();
+        stable_target_.reset();
+        last_sample_stamp_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        stable_target_stamp_ = last_sample_stamp_;
+      }
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Fine-align rejected invalid tag measurement: %s", error.what());
     }
   }
 

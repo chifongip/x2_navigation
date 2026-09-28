@@ -140,6 +140,11 @@ for the held box.
 `fine_align_server.ros__parameters` configures the tag admission gate, target,
 capture envelope, controller, settling criteria, and timeouts. A stable target
 may be propagated through odometry for at most 2.5 seconds without a fresh tag.
+Invalid tag geometry is rejected with a throttled warning and clears the cached
+target and stability samples. The server keeps running and accepts subsequent
+valid measurements. If acquisition times out, the action reports `NO_STABLE_TAG`
+using the configured retry policy rather than terminating the process. During
+motion, an invalidated target follows the existing tag-loss stop behavior.
 The previous OpenNav-based prototype is preserved on the local
 `archive/opennav-table-docking` branch.
 

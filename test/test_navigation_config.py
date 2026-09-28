@@ -36,7 +36,7 @@ def test_navigation_velocity_footprint_and_costmap_settings():
     configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
     controller = configuration["controller_server"]["ros__parameters"]["FollowPath"]
 
-    assert controller["min_vel_x"] == 0.0
+    assert controller["min_vel_x"] == -0.2
     assert controller["max_vel_x"] == 0.5
     assert controller["min_vel_theta"] == -1.0
     assert controller["max_vel_theta"] == 1.0
