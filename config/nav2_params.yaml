@@ -130,6 +130,14 @@ fine_align_server:
     maximum_pose_age: 2.5
     maximum_sample_gap: 2.5
     stable_sample_count: 3
+    # Robot-relative observations must arrive faster than this interval.
+    tracking_timeout: 1.2
+    tag_filter_time_constant: 0.15
+    motion_confirmation_samples: 2
+    position_hysteresis: 0.02
+    yaw_hysteresis: 0.034906585
+    direction_change_rate: 1.0
+    settling_duration: 0.5
     maximum_position_spread: 0.1
     maximum_angular_spread: 0.174532925
     capture_distance: 1.5
@@ -148,6 +156,8 @@ fine_align_server:
     progress_log_interval: 1.0
     undock_distance: 0.3
     undock_timeout: 10.0
+    undock_position_jump: 0.2
+    undock_yaw_jump: 0.3
     undock_translation_speed_min: 0.1
     undock_translation_speed_max: 0.1
     undock_angular_speed_min: 0.1
@@ -155,14 +165,14 @@ fine_align_server:
     translation_gain: 0.5
     yaw_gain: 1.0
     translation_speed_min: 0.1
-    translation_speed_max: 0.2
+    translation_speed_max: 0.1
     angular_speed_min: 0.1
-    angular_speed_max: 0.2
+    angular_speed_max: 0.1
     translation_yaw_stop: 0.3490658504
-    x_position_tolerance: 0.08
-    y_position_tolerance: 0.08
-    yaw_tolerance: 0.0872664626
-    settled_linear_velocity: 0.03
+    x_position_tolerance: 0.1
+    y_position_tolerance: 0.1
+    yaw_tolerance: 0.174532925
+    settled_linear_velocity: 0.05
     settled_angular_velocity: 0.05
     settled_sample_count: 3
 

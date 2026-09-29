@@ -62,11 +62,12 @@ pose, and `/manipulation_state` to report `EMPTY` or `HOLDING`. Execution uses a
 local holonomic controller that independently corrects forward, lateral, and yaw
 error while all output continues through Collision Monitor and the ZMQ deadman.
 
-The table detector remains limited to 1 Hz. Three consistent samples are required,
-so readiness and final settled confirmation each take at least three seconds. A
-tag-derived pose remains usable for at most 2.5 seconds. The initial final-base
-target is centered and square to the table at a 0.50 m standoff; commission this
-parameter on hardware before manipulation.
+The table detector defaults to 1 Hz. The tracking timeout defaults to 1.2 seconds
+to allow that cadence with modest scheduling margin. Acquisition requires three
+accepted observations; completion uses a time-based dwell with new evidence.
+Faster detection is preferable for motion, but the existing detector rate is
+preserved. The target is centered and square to the table at a configured 0.50 m
+standoff; commission this parameter on hardware before manipulation.
 
 ```bash
 # No motion: validate state, tag/TF stability, and capture geometry.
@@ -99,18 +100,71 @@ persistent collision stop, Nav2 activation, invalid manipulation state, stale
 odometry, timeout, and ROS shutdown all command zero velocity before termination.
 
 Nav2 publishes `/cmd_vel_nav`; the fine-align server selects either navigation or
-its internal alignment command. Planar alignment speed is bounded by vector
-magnitude to 0.20-0.30 m/s, preserving the x/y direction, and yaw is bounded to
-0.20-0.30 rad/s. Translation pauses at yaw errors of 20 degrees or more. The
-`x_position_tolerance` and `y_position_tolerance` parameters independently
-define the configured 0.05 m final deadbands; yaw tolerance is 0.0873 rad
-(5 degrees). Reverse x is enabled in the provided configuration; it uses the
-same planar speed range and accepts a target at most 0.15 m behind the robot.
+its internal alignment command. Planar speed is bounded by the configured vector
+magnitude, rather than independently on x and y. Setting translation minimum and
+maximum to 0.1 preserves a 0.1 m/s moving command; setting angular minimum and
+maximum to 0.1 preserves a 0.1 rad/s rotating command. Gains and speed limits are
+not changed by the tracking workflow. Inspect the running node's parameters when
+using launch overrides; the startup log reports effective limits.
+
+Docking looks up `base_link <- tag9` at each detection timestamp, through the
+camera/base TF branch. It no longer calculates docking error through `odom`.
+Camera calibration, dynamic camera/base transforms, and detection timestamps must
+be correct. Detections are queued until their matching TF arrives, without blocking
+the command timer. Future, stale, duplicate, and out-of-order detections are ignored.
+`fixed_frame` and `maximum_sample_gap` remain declared for launch compatibility;
+they no longer control docking pose tracking.
+
+`stable_sample_count` gates initial acquisition and reacquisition. Once acquired,
+each accepted observation updates the target without waiting for another batch.
+The tracker rejects jumps exceeding `maximum_position_spread` and
+`maximum_angular_spread` plus allowed robot motion over the observation interval.
+It filters translation and wrapped yaw using `tag_filter_time_constant` (0.15 s).
+Previous commanded motion predicts the relative error only for filtering a new
+observation; it is an approximation, not measured motion, and never extends tag
+freshness. Prediction disagreement therefore needs validation with the real gait.
+
+`tracking_timeout` (1.2 s), capped by `maximum_pose_age`, limits how long a cached
+relative observation may command motion. Invalid geometry clears tracking
+immediately; isolated pose outliers leave only the last accepted observation valid
+until its original timeout. On timeout the server stops, reports `REACQUIRING`,
+and applies the existing bounded retry policy. A gap longer than the timeout
+requires a new acquisition batch. The tag frequency must support this interval. For example, reducing the timeout
+to 0.5 s requires a faster detector than the existing 1 Hz default. Validate
+detection cadence, latency, and stopping distance before changing this limit.
+
+`motion_confirmation_samples` (2) counts distinct accepted observations before
+starting an axis or reversing it. Reversals first stop the affected axis.
+`position_hysteresis` (0.02 m) and `yaw_hysteresis` (0.0349 rad) widen resume
+thresholds after stopping; translation also requires confirmation below its yaw
+resume threshold. Stops at the inner tolerances remain immediate.
+`direction_change_rate` (1.0 rad/s) bounds changes in translation heading while
+preserving the configured speed magnitude. Large heading changes stop translation
+before selecting the new direction. There is no ramp below the configured minimum
+speed; gait-level acceleration/jerk handling remains the receiver's responsibility.
+Collision Monitor and watchdog zero commands are not smoothed.
+
+Docking completion requires both raw and filtered poses inside the existing
+x/y/yaw tolerances and fresh, finite `/odom` velocity below the settling limits.
+`settling_duration` (0.5 s) replaces `settled_sample_count` for both docking and
+undocking; the old parameter is still accepted for compatibility. The dwell resets
+when its conditions fail and can finish only on new pose and velocity evidence.
+Repeated control ticks on the same observation cannot complete settling. FAST_LIO
+velocity remains a provisional stopped-state check; odometry position is unused
+for docking. Configure `odom_topic` to independent, compatible robot odometry when
+available.
+
+Undocking still uses short-range odometry pose because tag visibility during
+retreat has not been established. It now aborts on abrupt pose changes exceeding
+`undock_position_jump` (0.2 m) or `undock_yaw_jump` (0.3 rad), plus the configured
+maximum motion over the elapsed interval. These guards detect large jumps, not
+slow drift. They must be validated against gait motion and odometry noise.
 
 During physical alignment, the server writes an INFO-level progress log every
 `progress_log_interval` seconds (default: 1.0). It includes the current base-frame
 x/y/yaw error, commanded `linear.x`, `linear.y`, and `angular.z`, settling state,
-stable-tag sequence number, and current attempt.
+accepted-tag sequence number, observation age, raw error, settling duration, and
+current attempt.
 
 Physical alignment retries recoverable failures up to `maximum_retries` times
 (default: 2, for three total attempts). Tag loss, capture-envelope drift, and
@@ -139,7 +193,7 @@ for the held box.
 
 `fine_align_server.ros__parameters` configures the tag admission gate, target,
 capture envelope, controller, settling criteria, and timeouts. A stable target
-may be propagated through odometry for at most 2.5 seconds without a fresh tag.
+is held in the robot frame only until the configured tracking timeout.
 Invalid tag geometry is rejected with a throttled warning and clears the cached
 target and stability samples. The server keeps running and accepts subsequent
 valid measurements. If acquisition times out, the action reports `NO_STABLE_TAG`

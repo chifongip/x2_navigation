@@ -355,14 +355,15 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     assert fine_align["translation_gain"] == 0.5
     assert fine_align["yaw_gain"] == 1.0
     assert fine_align["translation_speed_min"] == 0.1
-    assert fine_align["translation_speed_max"] == 0.2
+    assert fine_align["translation_speed_max"] == 0.1
     assert fine_align["angular_speed_min"] == 0.1
-    assert fine_align["angular_speed_max"] == 0.2
+    assert fine_align["angular_speed_max"] == 0.1
     assert fine_align["translation_yaw_stop"] == 0.3490658504
-    assert fine_align["x_position_tolerance"] == 0.08
-    assert fine_align["y_position_tolerance"] == 0.08
+    assert fine_align["x_position_tolerance"] == 0.1
+    assert fine_align["y_position_tolerance"] == 0.1
     assert "position_tolerance" not in fine_align
-    assert fine_align["yaw_tolerance"] == 0.0872664626
+    assert fine_align["yaw_tolerance"] == 0.174532925
+    assert fine_align["settled_linear_velocity"] == 0.05
     assert fine_align["settled_sample_count"] >= 3
     assert fine_align["allow_reverse_x"] is True
     assert fine_align["reverse_capture_distance"] == 0.3
@@ -398,27 +399,25 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     assert 'executable="collision_monitor"' in launch_source
 
 
-def test_fine_alignment_uses_latest_tag_transform_with_timestamp_coherence_checks():
-    fine_align_source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
+def test_fine_alignment_uses_timestamped_robot_relative_tag_transform():
+    source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
         encoding="utf-8"
     )
-
-    assert "fixed_frame_, tag_frame_, tf2::TimePointZero" in fine_align_source
-    assert "tag_frame_, tf2::TimePointZero, tf2::durationFromSec" not in fine_align_source
-    assert "stamp - transform_stamp" in fine_align_source
-    assert "stable_target_stamp_ = stamp" in fine_align_source
-    assert "stable_target_stamp_).seconds() > maximum_pose_age_" in fine_align_source
+    assert "lookupTransform(base_frame_, tag_frame_, stamp)" in source
+    assert "fixed_frame_, tag_frame_, tf2::TimePointZero" not in source
+    assert "processPendingDetection" in source
+    assert "std::min(tracking_timeout_, maximum_pose_age_)" in source
 
 
 def test_fine_alignment_owns_holonomic_control_and_settling():
-    fine_align_source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
+    source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
         encoding="utf-8"
     )
-
-    assert "holonomicFineAlignCommand(error, controller_config_)" in fine_align_source
-    assert "message->twist.twist.linear.y" in fine_align_source
-    assert "settled_samples >= settled_sample_count_" in fine_align_source
-    assert "DockRobot" not in fine_align_source
+    assert "DockingMotionController" in source
+    assert "message->twist.twist.linear.y" in source
+    assert "EvidenceSettling" in source
+    assert "settling_duration_" in source
+    assert "DockRobot" not in source
 
 
 def test_fine_alignment_logs_error_and_velocity_command_during_execution():

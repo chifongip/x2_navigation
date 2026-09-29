@@ -30,6 +30,14 @@ def generate_test_description():
             {
                 "stable_sample_count": 1,
                 "settled_sample_count": 1,
+                "settling_duration": 0.15,
+                "tracking_timeout": 0.5,
+                "translation_gain": 1.0,
+                "translation_speed_max": 0.1,
+                "angular_speed_max": 0.1,
+                # Keep the simulated 0.1 m retreat outside the initial deadband.
+                "x_position_tolerance": 0.08,
+                "y_position_tolerance": 0.08,
                 "acquisition_timeout": 0.5,
                 "approach_timeout": 3.0,
                 "maximum_pose_age": 1.0,
@@ -89,6 +97,12 @@ class TestFineAlignServer(unittest.TestCase):
         self.nav_active = False
         self.collision_stopped = False
         self.invalid_tag_orientation = False
+        self.tag_x = 1.10
+        self.tag_y = 0.20
+        self.base_tf_x = 1.10
+        self.publish_tags = True
+        self.simulate_motion = False
+        self.last_input_time = time.monotonic()
         self.command_subscription = self.node.create_subscription(
             Twist, "/cmd_vel_raw", self.commands.append, 10
         )
@@ -110,17 +124,33 @@ class TestFineAlignServer(unittest.TestCase):
         self.node.destroy_node()
 
     def publish_inputs(self):
+        input_time = time.monotonic()
+        if self.simulate_motion and self.commands:
+            command = self.commands[-1]
+            dt = input_time - self.last_input_time
+            self.tag_x -= command.linear.x * dt
+            self.tag_y -= command.linear.y * dt
+            self.odom_linear_velocity = (
+                command.linear.x ** 2 + command.linear.y ** 2
+            ) ** 0.5
+            # Deliberately drift the odom frame independently of the relative tag.
+            self.base_tf_x += dt * 2.0
+        self.last_input_time = input_time
         stamp = self.node.get_clock().now().to_msg()
 
         tag = TransformStamped()
         tag.header.stamp = stamp
-        tag.header.frame_id = "odom"
+        # Publish the tag through the camera/base branch, independent of odom.
+        tag.header.frame_id = "base_link"
         tag.child_frame_id = "tag9"
-        # Tag +Z points out of the table along odom +X. The target is therefore
-        # (0.50, 0.0, pi) for the configured 0.50 m standoff.
+        tag.transform.translation.x = self.tag_x
+        tag.transform.translation.y = self.tag_y
+        if self.simulate_motion:
+            tag.transform.translation.x += 0.002 * sin(input_time * 20.0)
+            tag.transform.translation.y += 0.002 * cos(input_time * 20.0)
         tag.transform.rotation.x = 0.5
-        tag.transform.rotation.y = 0.5
-        tag.transform.rotation.z = 0.5
+        tag.transform.rotation.y = -0.5
+        tag.transform.rotation.z = -0.5
         tag.transform.rotation.w = 0.5
         if self.invalid_tag_orientation:
             # Identity rotation puts tag +Z vertically, invalid for table docking.
@@ -133,11 +163,11 @@ class TestFineAlignServer(unittest.TestCase):
         base.header.stamp = stamp
         base.header.frame_id = "odom"
         base.child_frame_id = "base_link"
-        base.transform.translation.x = 1.10
+        base.transform.translation.x = self.base_tf_x
         base.transform.translation.y = 0.20
         base.transform.rotation.z = 1.0
         base.transform.rotation.w = 0.0
-        self.transforms.sendTransform([tag, base])
+        self.transforms.sendTransform([tag, base] if self.publish_tags else [base])
 
         detection = AprilTagDetection()
         detection.id = 9
@@ -145,7 +175,8 @@ class TestFineAlignServer(unittest.TestCase):
         message = AprilTagDetectionArray()
         message.header.stamp = stamp
         message.detections = [detection]
-        self.detections.publish(message)
+        if self.publish_tags:
+            self.detections.publish(message)
 
         state = ManipulationState()
         state.state = self.manipulation_state
@@ -457,6 +488,124 @@ class TestFineAlignServer(unittest.TestCase):
         self.assertTrue(self.spin_with_inputs_until(cancel.done))
         result = undock_handle.get_result_async()
         self.assertTrue(self.spin_with_inputs_until(result.done))
+
+    def test_docking_ignores_odometry_pose_jumps(self):
+        self.base_tf_x = 100.0
+        self.odom_x = -100.0
+        self.warm_up_inputs()
+        goal = FineAlign.Goal()
+        goal.execute = False
+        sent = self.client.send_goal_async(goal)
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        result = sent.result().get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        outcome = result.result().result
+        self.assertTrue(outcome.success, outcome.message)
+        self.assertAlmostEqual(outcome.final_error.x, 0.6, delta=0.02)
+        self.assertAlmostEqual(outcome.final_error.y, 0.2, delta=0.02)
+
+    def test_docking_settles_with_new_tag_and_velocity_evidence(self):
+        self.tag_x = 0.5
+        self.tag_y = 0.0
+        self.warm_up_inputs()
+        goal = FineAlign.Goal()
+        goal.execute = True
+        sent = self.client.send_goal_async(goal)
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        result = sent.result().get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertTrue(result.result().result.success, result.result().result.message)
+        self.assertFalse(any(command != Twist() for command in self.commands))
+
+    def test_tag_dropout_stops_motion_and_reacquires(self):
+        self.warm_up_inputs()
+        stages = []
+        goal = FineAlign.Goal()
+        goal.execute = True
+        sent = self.client.send_goal_async(
+            goal, feedback_callback=lambda message: stages.append(message.feedback.stage)
+        )
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(handle.accepted)
+        self.assertTrue(self.spin_with_inputs_until(
+            lambda: any(command.linear.x > 0.0 for command in self.commands)
+        ))
+        self.publish_tags = False
+        self.assertTrue(self.spin_with_inputs_until(
+            lambda: FineAlign.Feedback.REACQUIRING in stages
+        ))
+        self.assertTrue(self.spin_with_inputs_until(lambda: self.commands[-1] == Twist()))
+        self.commands.clear()
+        self.publish_tags = True
+        self.assertTrue(self.spin_with_inputs_until(
+            lambda: any(command.linear.x > 0.0 for command in self.commands)
+        ))
+        moving = [command for command in self.commands if command.linear.x > 0.0]
+        self.assertTrue(all(
+            abs((command.linear.x ** 2 + command.linear.y ** 2) ** 0.5 - 0.1) < 1e-6
+            for command in moving
+        ))
+        cancel = handle.cancel_goal_async()
+        self.assertTrue(self.spin_with_inputs_until(cancel.done))
+        result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+
+    def test_cached_tag_cannot_complete_settling(self):
+        self.tag_x = 0.5
+        self.tag_y = 0.0
+        self.warm_up_inputs()
+        self.publish_tags = False
+        goal = FineAlign.Goal()
+        goal.execute = True
+        sent = self.client.send_goal_async(goal)
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        result = handle.get_result_async()
+        # New odometry alone must not turn one cached tag observation into success.
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            self.publish_inputs()
+            rclpy.spin_once(self.node, timeout_sec=0.02)
+        self.assertFalse(result.done())
+        self.publish_tags = True
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertTrue(result.result().result.success, result.result().result.message)
+
+    def test_simulated_motion_converges_with_tag_jitter_and_odom_drift(self):
+        self.tag_x = 0.75
+        self.tag_y = 0.12
+        self.simulate_motion = True
+        self.warm_up_inputs()
+        goal = FineAlign.Goal()
+        goal.execute = True
+        sent = self.client.send_goal_async(goal)
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        result = sent.result().get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done, timeout=8.0))
+        self.assertTrue(result.result().result.success, result.result().result.message)
+        self.assertLessEqual(abs(self.tag_x - 0.5), 0.085)
+        self.assertLessEqual(abs(self.tag_y), 0.085)
+        moving = [command for command in self.commands if command.linear.x or command.linear.y]
+        self.assertTrue(moving)
+        self.assertTrue(all(
+            abs((command.linear.x ** 2 + command.linear.y ** 2) ** 0.5 - 0.1) < 1e-6
+            for command in moving
+        ))
+
+    def test_undock_aborts_for_odometry_pose_jump(self):
+        self.warm_up_inputs()
+        sent = self.undock_client.send_goal_async(Undock.Goal())
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(self.spin_with_inputs_until(
+            lambda: any(command.linear.x < 0.0 for command in self.commands)
+        ))
+        self.odom_x = -2.0
+        result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertEqual(result.result().result.error_code, Undock.Result.ODOMETRY_UNAVAILABLE)
+        self.assertIn("jumped", result.result().result.message)
 
 
 @launch_testing.post_shutdown_test()
