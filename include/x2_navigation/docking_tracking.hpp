@@ -106,19 +106,27 @@ struct DockingMotionConfig
   double direction_rate{1.0};
 };
 
+inline double dockingStopTolerance(double tolerance, double hysteresis)
+{
+  // Keep the entire hysteresis band inside the completion tolerance.
+  return std::max(tolerance - hysteresis, tolerance * 0.5);
+}
+
 class ConfirmedAxis
 {
 public:
   int update(double error, double tolerance, double hysteresis, std::size_t confirmations)
   {
-    const int requested = std::abs(error) <= tolerance ? 0 : (error > 0.0 ? 1 : -1);
+    const double magnitude = std::abs(error);
+    const int requested = magnitude <= dockingStopTolerance(tolerance, hysteresis) ?
+      0 : (error > 0.0 ? 1 : -1);
     if (requested == 0) {
       active_ = pending_ = 0;
       count_ = 0;
     } else if (requested != active_) {
-      // Stop before reversing. Resume only outside the wider deadband.
+      // Stop before reversing. Every error outside completion can request motion.
       active_ = 0;
-      if (std::abs(error) <= tolerance + hysteresis) {
+      if (magnitude <= tolerance) {
         pending_ = 0;
         count_ = 0;
       } else {
@@ -174,7 +182,14 @@ public:
     PlanarError selected{
       x_active_ ? error.x : 0.0, y_active_ ? error.y : 0.0, error.yaw};
     // Preserve the original yaw-based speed ceiling even when yaw is in its deadband.
-    auto command = holonomicFineAlignCommand(selected, controller_);
+    auto moving_config = controller_;
+    moving_config.x_position_tolerance = dockingStopTolerance(
+      controller_.x_position_tolerance, motion_.position_hysteresis);
+    moving_config.y_position_tolerance = dockingStopTolerance(
+      controller_.y_position_tolerance, motion_.position_hysteresis);
+    moving_config.yaw_tolerance = dockingStopTolerance(
+      controller_.yaw_tolerance, motion_.yaw_hysteresis);
+    auto command = holonomicFineAlignCommand(selected, moving_config);
     if (!command) {
       return command;
     }

@@ -135,9 +135,13 @@ detection cadence, latency, and stopping distance before changing this limit.
 
 `motion_confirmation_samples` (2) counts distinct accepted observations before
 starting an axis or reversing it. Reversals first stop the affected axis.
-`position_hysteresis` (0.02 m) and `yaw_hysteresis` (0.0349 rad) widen resume
-thresholds after stopping; translation also requires confirmation below its yaw
-resume threshold. Stops at the inner tolerances remain immediate.
+`position_hysteresis` (0.02 m) and `yaw_hysteresis` (0.0349 rad) define tighter
+stop thresholds inside the configured completion tolerances. A stopped axis can
+restart after confirmed observations outside its completion tolerance. An active
+axis continues until its error reaches `max(tolerance - hysteresis, tolerance / 2)`.
+For a 0.10 m tolerance and 0.02 m hysteresis, restart is above 0.10 m and stop is
+at or below 0.08 m. There is no stopped waiting band outside completion.
+Translation also requires confirmation below its yaw resume threshold.
 `direction_change_rate` (1.0 rad/s) bounds changes in translation heading while
 preserving the configured speed magnitude. Large heading changes stop translation
 before selecting the new direction. There is no ramp below the configured minimum
@@ -145,7 +149,8 @@ speed; gait-level acceleration/jerk handling remains the receiver's responsibili
 Collision Monitor and watchdog zero commands are not smoothed.
 
 Docking completion requires both raw and filtered poses inside the existing
-x/y/yaw tolerances and fresh, finite `/odom` velocity below the settling limits.
+x/y/yaw tolerances, a zero movement command, and fresh, finite `/odom` velocity
+below the settling limits.
 `settling_duration` (0.5 s) replaces `settled_sample_count` for both docking and
 undocking; the old parameter is still accepted for compatibility. The dwell resets
 when its conditions fail and can finish only on new pose and velocity evidence.
@@ -164,7 +169,10 @@ During physical alignment, the server writes an INFO-level progress log every
 `progress_log_interval` seconds (default: 1.0). It includes the current base-frame
 x/y/yaw error, commanded `linear.x`, `linear.y`, and `angular.z`, settling state,
 accepted-tag sequence number, observation age, raw error, settling duration, and
-current attempt.
+current attempt. It reports pose eligibility, whether the movement command is
+zero, and odometry validity/freshness, age, linear speed, and angular speed
+separately. `odometry_settled` now describes measured velocity eligibility
+independently of the pose check; completion still requires all conditions.
 
 Physical alignment retries recoverable failures up to `maximum_retries` times
 (default: 2, for three total attempts). Tag loss, capture-envelope drift, and

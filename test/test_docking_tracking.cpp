@@ -106,12 +106,41 @@ TEST(DockingMotion, DoesNotChatterAtPositionTolerance)
   DockingMotionController controller(minimumSpeedConfig(), {});
   controller.update({0.2, 0.0, 0.0}, 0.05, true);
   ASSERT_GT(controller.update({0.2, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
-  EXPECT_DOUBLE_EQ(controller.update({0.049, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
+  EXPECT_GT(controller.update({0.049, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
+  EXPECT_DOUBLE_EQ(controller.update({0.029, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
   for (int i = 0; i < 10; ++i) {
-    EXPECT_DOUBLE_EQ(controller.update({0.051, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
+    EXPECT_DOUBLE_EQ(controller.update({0.049, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
   }
-  EXPECT_DOUBLE_EQ(controller.update({0.08, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
-  EXPECT_GT(controller.update({0.08, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
+  EXPECT_DOUBLE_EQ(controller.update({0.051, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
+  EXPECT_GT(controller.update({0.051, 0.0, 0.0}, 0.05, true)->linear.x, 0.0);
+}
+
+TEST(DockingMotion, CorrectsReportedErrorInsteadOfWaitingOutsideCompletion)
+{
+  auto config = minimumSpeedConfig();
+  config.x_position_tolerance = config.y_position_tolerance = 0.1;
+  config.yaw_tolerance = 0.174532925;
+  DockingMotionController controller(config, {});
+  const PlanarError reported{0.112, -0.085, 0.007};
+  EXPECT_DOUBLE_EQ(controller.update(reported, 0.05, true)->linear.x, 0.0);
+  EXPECT_DOUBLE_EQ(controller.update(reported, 0.05, false)->linear.x, 0.0);
+  const auto moving = controller.update(reported, 0.05, true);
+  EXPECT_NEAR(moving->linear.x, 0.1, 1e-9);
+  EXPECT_DOUBLE_EQ(moving->linear.y, 0.0);
+  EXPECT_GT(controller.update({0.09, -0.085, 0.007}, 0.05, true)->linear.x, 0.0);
+  EXPECT_DOUBLE_EQ(controller.update({0.079, -0.085, 0.007}, 0.05, true)->linear.x, 0.0);
+}
+
+TEST(DockingMotion, CorrectsYawJustOutsideCompletionTolerance)
+{
+  auto config = minimumSpeedConfig();
+  config.yaw_tolerance = 0.174532925;
+  DockingMotionController controller(config, {});
+  controller.update({0.0, 0.0, -0.18}, 0.05, true);
+  EXPECT_NEAR(controller.update({0.0, 0.0, -0.18}, 0.05, true)->angular.z, -0.1, 1e-9);
+  EXPECT_NEAR(controller.update({0.0, 0.0, -0.15}, 0.05, true)->angular.z, -0.1, 1e-9);
+  EXPECT_DOUBLE_EQ(controller.update({0.0, 0.0, -0.13}, 0.05, true)->angular.z, 0.0);
+  EXPECT_GT(dockingStopTolerance(0.01, 0.02), 0.0);
 }
 
 TEST(DockingMotion, StopsBeforeConfirmedReversal)

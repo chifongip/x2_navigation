@@ -591,12 +591,17 @@ private:
 
       const bool at_goal = fineAlignAtGoal(error, controller_config_) &&
         fineAlignAtGoal(raw_error, controller_config_);
+      const bool command_stopped = command->linear.x == 0.0 && command->linear.y == 0.0 &&
+        command->angular.z == 0.0;
       OdometrySnapshot velocity{};
-      const bool odometry_settled = at_goal && odometrySnapshot(velocity) &&
+      const bool odometry_available = odometrySnapshot(velocity);
+      const bool odometry_settled = odometry_available &&
         velocity.linear_velocity <= settled_linear_velocity_ &&
         velocity.angular_velocity <= settled_angular_velocity_;
+      const bool settling_pose = at_goal && command_stopped;
       const bool completed = settling.update(
-        odometry_settled, std::chrono::duration<double>(control_time.time_since_epoch()).count(),
+        settling_pose && odometry_settled,
+        std::chrono::duration<double>(control_time.time_since_epoch()).count(),
         sequence, velocity.sequence, settling_duration_);
 
       const auto current_steady_time = std::chrono::steady_clock::now();
@@ -607,18 +612,25 @@ private:
           "error_base=(x=%.3f m, y=%.3f m, yaw=%.3f rad); "
           "command=(linear.x=%.3f m/s, linear.y=%.3f m/s, angular.z=%.3f rad/s); "
           "stage=%s; odometry_settled=%s; settling_duration=%.3f s; "
-          "tag_age=%.3f s; raw_error=(%.3f, %.3f, %.3f); new_observation=%s",
+          "tag_age=%.3f s; raw_error=(%.3f, %.3f, %.3f); new_observation=%s; "
+          "pose_within_tolerance=%s; command_stopped=%s; odom_valid_fresh=%s; "
+          "odom_age=%.3f s; odom_linear=%.3f m/s; odom_angular=%.3f rad/s",
           attempt, maximum_attempts, static_cast<unsigned long long>(sequence),
           error.x, error.y, error.yaw,
           command->linear.x, command->linear.y, command->angular.z,
-          at_goal ? "settling" : "controlling", odometry_settled ? "true" : "false",
+          settling_pose ? "settling" : "controlling", odometry_settled ? "true" : "false",
           settling_duration_, observation_age, raw_error.x, raw_error.y, raw_error.yaw,
-          new_observation ? "true" : "false");
+          new_observation ? "true" : "false", at_goal ? "true" : "false",
+          command_stopped ? "true" : "false", odometry_available ? "true" : "false",
+          velocity.sequence == 0 ? std::numeric_limits<double>::quiet_NaN() : velocity.age,
+          velocity.sequence == 0 ? std::numeric_limits<double>::quiet_NaN() : velocity.linear_velocity,
+          velocity.sequence == 0 ? std::numeric_limits<double>::quiet_NaN() : velocity.angular_velocity);
         next_progress_log = current_steady_time + progress_log_period;
       }
 
       auto feedback = std::make_shared<FineAlign::Feedback>();
-      feedback->stage = at_goal ? FineAlign::Feedback::SETTLING : FineAlign::Feedback::CONTROLLING;
+      feedback->stage = settling_pose ?
+        FineAlign::Feedback::SETTLING : FineAlign::Feedback::CONTROLLING;
       feedback->current_error = errorMessage(error);
       feedback->tag_visible = true;
       feedback->progress = static_cast<float>(

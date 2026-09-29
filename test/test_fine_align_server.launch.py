@@ -572,6 +572,26 @@ class TestFineAlignServer(unittest.TestCase):
         self.assertTrue(self.spin_with_inputs_until(result.done))
         self.assertTrue(result.result().result.success, result.result().result.message)
 
+    def test_error_between_old_restart_and_completion_thresholds_moves_and_finishes(self):
+        # Fixture tolerance is 0.08 m: the previous restart threshold was 0.10 m.
+        self.tag_x = 0.59
+        self.tag_y = 0.0
+        self.warm_up_inputs()
+        goal = FineAlign.Goal()
+        goal.execute = True
+        sent = self.client.send_goal_async(goal)
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(handle.accepted)
+        self.assertTrue(self.spin_with_inputs_until(
+            lambda: any(command.linear.x > 0.0 for command in self.commands)
+        ))
+        self.tag_x = 0.55
+        result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(result.done))
+        self.assertTrue(result.result().result.success, result.result().result.message)
+        self.assertTrue(self.spin_with_inputs_until(lambda: self.commands[-1] == Twist()))
+
     def test_simulated_motion_converges_with_tag_jitter_and_odom_drift(self):
         self.tag_x = 0.75
         self.tag_y = 0.12
