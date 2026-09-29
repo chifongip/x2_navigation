@@ -79,25 +79,34 @@ ros2 action send_goal /fine_align x2_navigation/action/FineAlign \
   "{execute: true}" --feedback
 ```
 
-Undocking is a separate fixed-profile physical operation exposed as
-`/undock` (`x2_navigation/action/Undock`). It does not require a visible tag.
-The server snapshots the current odometry pose and creates a fixed target
-`undock_distance` behind it. The holonomic controller drives toward that target,
-using negative `linear.x` for the retreat while correcting lateral and yaw drift
-with `linear.y` and `angular.z`. The provided configuration retreats 0.30 m with
-a 10.0 s timeout. Independent undocking translation and angular minimum/maximum
-speed parameters all default to 0.10; the controller deliberately reuses the
-existing `x_position_tolerance`, `y_position_tolerance`, and `yaw_tolerance`.
+Undocking is a separate fixed-profile operation exposed as `/undock`
+(`x2_navigation/action/Undock`). Both docking and undocking now require the same
+visible table tag and have no odometry subscription or measured-velocity gate.
+Undocking first acquires a fresh stable relative target, then defines a robot pose
+`undock_distance` behind the initial robot pose, preserving the initial heading.
+It computes the current error through the full planar relative transform:
+`current_base_to_dock * inverse(initial_base_to_dock) * initial_base_to_retreat`.
+The dock frame is derived from the tag; standoff and lateral offsets cancel in
+this relative calculation. The controller corrects backward, lateral, and yaw
+error at the configured undock speeds. Distance traveled is the backward
+projection of the tag-derived robot displacement in the initial robot frame.
+
+The provided profile retreats 0.30 m with a 10.0 s movement timeout. Acquisition
+has a separate `acquisition_timeout`. Independent undocking translation and
+angular minimum/maximum speeds remain unchanged. Undocking shares the existing
+position/yaw tolerances, motion hysteresis, tag tracking, command mux, Collision
+Monitor, watchdog, manipulation-state gate, and Nav2-idle gate.
 
 ```bash
 ros2 action send_goal /undock x2_navigation/action/Undock "{}" --feedback
 ```
 
-Docking and undocking are mutually exclusive and share the same command mux,
-Collision Monitor path, watchdog, manipulation-state gate, Nav2-idle gate, and
-odometry settling criteria. Undocking has no automatic retry. Cancellation,
-persistent collision stop, Nav2 activation, invalid manipulation state, stale
-odometry, timeout, and ROS shutdown all command zero velocity before termination.
+Undocking has no automatic retry. Missing/stale/invalid tag tracking commands zero
+and aborts with `NO_STABLE_TAG` (code 4), replacing the old
+`ODOMETRY_UNAVAILABLE` name. Clients should rebuild the regenerated action
+interface. Cancellation, persistent collision stop, Nav2 activation, invalid
+manipulation state, timeout, and ROS shutdown also command zero. The tag must
+remain visible throughout retreat; there is no blind odometry or timed fallback.
 
 Nav2 publishes `/cmd_vel_nav`; the fine-align server selects either navigation or
 its internal alignment command. Planar speed is bounded by the configured vector
@@ -112,8 +121,8 @@ camera/base TF branch. It no longer calculates docking error through `odom`.
 Camera calibration, dynamic camera/base transforms, and detection timestamps must
 be correct. Detections are queued until their matching TF arrives, without blocking
 the command timer. Future, stale, duplicate, and out-of-order detections are ignored.
-`fixed_frame` and `maximum_sample_gap` remain declared for launch compatibility;
-they no longer control docking pose tracking.
+`maximum_sample_gap` remains declared for launch compatibility. Legacy
+`fixed_frame` and odometry-related YAML settings are retained but ignored.
 
 `stable_sample_count` gates initial acquisition and reacquisition. Once acquired,
 each accepted observation updates the target without waiting for another batch.
@@ -148,31 +157,32 @@ before selecting the new direction. There is no ramp below the configured minimu
 speed; gait-level acceleration/jerk handling remains the receiver's responsibility.
 Collision Monitor and watchdog zero commands are not smoothed.
 
-Docking completion requires both raw and filtered poses inside the existing
-x/y/yaw tolerances, a zero movement command, and fresh, finite `/odom` velocity
-below the settling limits.
-`settling_duration` (0.5 s) replaces `settled_sample_count` for both docking and
-undocking; the old parameter is still accepted for compatibility. The dwell resets
-when its conditions fail and can finish only on new pose and velocity evidence.
-Repeated control ticks on the same observation cannot complete settling. FAST_LIO
-velocity remains a provisional stopped-state check; odometry position is unused
-for docking. Configure `odom_topic` to independent, compatible robot odometry when
-available.
+Completion of both operations requires raw and filtered poses within their
+existing target tolerances, a zero movement command, and stable fresh relative tag
+poses over `settling_duration` (0.5 s). The raw relative pose must stay within
+`settling_position_spread` (0.02 m) and `settling_angular_spread` (0.0349 rad) of
+the first qualifying observation. Motion, pose disagreement, a nonzero command,
+or loss of eligibility resets the dwell. Repeated ticks using the same observation
+cannot complete it. At 1 Hz, completion requires a subsequent fresh observation
+and therefore takes at least one observation interval. `settled_sample_count`
+remains accepted for compatibility; it does not determine completion.
 
-Undocking still uses short-range odometry pose because tag visibility during
-retreat has not been established. It now aborts on abrupt pose changes exceeding
-`undock_position_jump` (0.2 m) or `undock_yaw_jump` (0.3 rad), plus the configured
-maximum motion over the elapsed interval. These guards detect large jumps, not
-slow drift. They must be validated against gait motion and odometry noise.
+Visual settling observes motion relative to the table; it cannot independently
+prove that the robot body has stopped. The table/tag must be stationary and camera
+calibration and timestamps must be accurate. Future reliable robot odometry can
+be added as an optional motion-feedback gate alongside this visual check. There
+is currently no odometry feedback, pose, velocity, freshness, or sample-sequence
+dependency in either action. Navigation's FAST_LIO adapter, `/odom`, and TF pipeline
+are unchanged. Legacy YAML odometry topics/timeouts, measured-speed settling
+limits, and undock jump limits are ignored; existing tuned values are preserved.
 
 During physical alignment, the server writes an INFO-level progress log every
 `progress_log_interval` seconds (default: 1.0). It includes the current base-frame
 x/y/yaw error, commanded `linear.x`, `linear.y`, and `angular.z`, settling state,
 accepted-tag sequence number, observation age, raw error, settling duration, and
-current attempt. It reports pose eligibility, whether the movement command is
-zero, and odometry validity/freshness, age, linear speed, and angular speed
-separately. `odometry_settled` now describes measured velocity eligibility
-independently of the pose check; completion still requires all conditions.
+current attempt. It reports pose eligibility, zero-command status, and visual
+settling completion separately. Undocking logs the same tag diagnostics and its
+relative retreat progress.
 
 Physical alignment retries recoverable failures up to `maximum_retries` times
 (default: 2, for three total attempts). Tag loss, capture-envelope drift, and

@@ -82,7 +82,7 @@ target_compile_options(fine_align_server PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(fine_align_server PRIVATE include)
 target_link_libraries(fine_align_server Eigen3::Eigen)
 ament_target_dependencies(fine_align_server
-  action_msgs agibot_x2_manipulation_msgs apriltag_msgs geometry_msgs nav_msgs
+  action_msgs agibot_x2_manipulation_msgs apriltag_msgs geometry_msgs
   nav2_msgs rclcpp rclcpp_action tf2 tf2_eigen tf2_geometry_msgs tf2_ros
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")

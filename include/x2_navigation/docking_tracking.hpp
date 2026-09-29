@@ -242,33 +242,65 @@ private:
   std::optional<double> direction_;
 };
 
-// Completion is measured in time, and can advance only with new sensor evidence.
-class EvidenceSettling
+inline Eigen::Isometry3d planarPose(const PlanarError & error)
+{
+  Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  pose.translation().x() = error.x;
+  pose.translation().y() = error.y;
+  pose.linear() = Eigen::AngleAxisd(error.yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  return pose;
+}
+
+inline Eigen::Isometry3d tagRelativeUndockTarget(
+  const Eigen::Isometry3d & initial_to_dock, const Eigen::Isometry3d & current_to_dock,
+  double distance)
+{
+  Eigen::Isometry3d retreat = Eigen::Isometry3d::Identity();
+  retreat.translation().x() = -distance;
+  return current_to_dock * initial_to_dock.inverse() * retreat;
+}
+
+// Visual settling requires a zero command and fresh, consistent relative poses.
+// It is not an independent measurement of robot velocity.
+class TagPoseSettling
 {
 public:
-  bool update(bool valid, double now, std::uint64_t pose, std::uint64_t velocity, double duration)
+  bool update(
+    bool valid, double now, std::uint64_t sequence, const PlanarError & observed,
+    double duration, double position_spread, double angular_spread)
   {
     if (!valid) {
       started_.reset();
       return false;
     }
     if (!started_) {
-      started_ = now;
-      pose_ = pose;
-      velocity_ = velocity;
+      start(now, sequence, observed);
       return false;
     }
-    if (pose <= pose_ || velocity <= velocity_) {
+    if (sequence <= sequence_) {
       return false;
     }
-    pose_ = pose;
-    velocity_ = velocity;
+    sequence_ = sequence;
+    if (std::hypot(observed.x - anchor_.x, observed.y - anchor_.y) > position_spread ||
+      std::abs(wrapAngle(observed.yaw - anchor_.yaw)) > angular_spread)
+    {
+      start(now, sequence, observed);
+      return false;
+    }
     return now - *started_ >= duration;
   }
 
 private:
+  void start(double now, std::uint64_t sequence, const PlanarError & observed)
+  {
+    started_ = now;
+    sequence_ = sequence;
+    anchor_ = observed;
+  }
+
   std::optional<double> started_;
-  std::uint64_t pose_{0}, velocity_{0};
+  std::uint64_t sequence_{0};
+  PlanarError anchor_;
 };
 
 }  // namespace x2_navigation

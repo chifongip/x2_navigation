@@ -414,8 +414,9 @@ def test_fine_alignment_owns_holonomic_control_and_settling():
         encoding="utf-8"
     )
     assert "DockingMotionController" in source
-    assert "message->twist.twist.linear.y" in source
-    assert "EvidenceSettling" in source
+    assert "nav_msgs::msg::Odometry" not in source
+    assert "odometrySnapshot" not in source
+    assert "TagPoseSettling" in source
     assert "settling_duration_" in source
     assert "DockRobot" not in source
 
@@ -450,7 +451,7 @@ def test_fine_alignment_logs_abort_context_before_terminating():
 
     assert "Fine-align action abort:" in fine_align_source
     assert "stable_target_%s" in fine_align_source
-    assert "odometry_%s" in fine_align_source
+    assert "odometry_%s" not in fine_align_source
     finish_start = fine_align_source.index("  void finish(\n")
     finish_end = fine_align_source.index("  void finishCanceledOrFailed(\n", finish_start)
     finish_source = fine_align_source[finish_start:finish_end]
@@ -465,7 +466,8 @@ def test_undocking_uses_holonomic_drift_correction_with_diagnostics():
     action = (package_root / "action" / "Undock.action").read_text(encoding="utf-8")
 
     assert 'this, "/undock"' in source
-    assert "holonomicFineAlignCommand(error, undock_controller_config_)" in source
+    assert "DockingMotionController motion_controller(undock_controller_config_" in source
+    assert "tagRelativeUndockTarget" in source
     assert "fineAlignAtGoal(error, undock_controller_config_)" in source
     assert "undock_controller_config_ = controller_config_;" in source
     assert "undock_controller_config_.allow_reverse_x = true;" in source

@@ -177,16 +177,45 @@ TEST(DockingMotion, YawGateRequiresLowerThresholdToResume)
   EXPECT_GT(controller.update({0.6, 0.0, 0.3}, 0.05, true)->linear.x, 0.0);
 }
 
-TEST(EvidenceSettling, RequiresDurationAndNewPoseAndVelocity)
+TEST(TagPoseSettling, RequiresNewObservationsAndResetsOnMotion)
 {
-  EvidenceSettling settling;
-  EXPECT_FALSE(settling.update(true, 1.0, 1, 1, 0.5));
-  EXPECT_FALSE(settling.update(true, 2.0, 1, 1, 0.5));
-  EXPECT_FALSE(settling.update(true, 2.0, 2, 1, 0.5));
-  EXPECT_TRUE(settling.update(true, 2.1, 2, 2, 0.5));
-  EXPECT_FALSE(settling.update(false, 2.2, 3, 3, 0.5));
-  EXPECT_FALSE(settling.update(true, 2.3, 4, 4, 0.5));
-  EXPECT_FALSE(settling.update(true, 2.4, 5, 5, 0.5));
-  EXPECT_TRUE(settling.update(true, 2.9, 6, 6, 0.5));
+  TagPoseSettling settling;
+  const PlanarError initial{0.05, 0.01, 3.13};
+  EXPECT_FALSE(settling.update(true, 1.0, 1, initial, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(true, 2.0, 1, initial, 0.5, 0.02, 0.04));
+  EXPECT_TRUE(settling.update(true, 2.1, 2, {0.051, 0.01, -3.13}, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(true, 2.2, 3, {0.08, 0.01, -3.13}, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(true, 2.3, 4, {0.08, 0.01, -3.13}, 0.5, 0.02, 0.04));
+  EXPECT_TRUE(settling.update(true, 2.8, 5, {0.08, 0.01, -3.13}, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(false, 2.9, 6, initial, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(true, 3.0, 7, initial, 0.5, 0.02, 0.04));
+}
+
+TEST(TagRelativeUndocking, MeasuresRetreatInInitialRobotFrame)
+{
+  const auto initial_to_dock = planarPose({0.6, 0.2, 0.3});
+  const auto robot_pose = planarPose({-0.3, 0.0, 0.0});
+  const auto current_to_dock = robot_pose.inverse() * initial_to_dock;
+  const auto target = tagRelativeUndockTarget(initial_to_dock, current_to_dock, 0.3);
+  const auto error = planarError(Eigen::Isometry3d::Identity(), target);
+  EXPECT_NEAR(error.x, 0.0, 1e-9);
+  EXPECT_NEAR(error.y, 0.0, 1e-9);
+  EXPECT_NEAR(error.yaw, 0.0, 1e-9);
+  const auto measured = initial_to_dock * current_to_dock.inverse();
+  EXPECT_NEAR(-measured.translation().x(), 0.3, 1e-9);
+}
+
+TEST(TagRelativeUndocking, CorrectsLateralAndYawDrift)
+{
+  const auto initial = planarPose({0.6, -0.2, -0.3});
+  const auto robot = planarPose({-0.05, 0.1, 0.2});
+  const auto current = robot.inverse() * initial;
+  const auto target = tagRelativeUndockTarget(initial, current, 0.3);
+  const auto expected = robot.inverse() * planarPose({-0.3, 0.0, 0.0});
+  EXPECT_TRUE(target.matrix().isApprox(expected.matrix(), 1e-9));
+  const auto error = planarError(Eigen::Isometry3d::Identity(), target);
+  EXPECT_LT(error.x, 0.0);
+  EXPECT_LT(error.y, 0.0);
+  EXPECT_NEAR(error.yaw, -0.2, 1e-9);
 }
 }  // namespace

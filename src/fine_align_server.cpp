@@ -22,7 +22,6 @@
 #include <geometry_msgs/msg/pose2_d.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav2_msgs/msg/collision_monitor_state.hpp>
-#include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <tf2/exceptions.h>
@@ -48,7 +47,6 @@ public:
   FineAlignServer()
   : Node("fine_align_server"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
   {
-    fixed_frame_ = declare_parameter("fixed_frame", "odom");
     base_frame_ = declare_parameter("base_frame", "base_link");
     tag_frame_ = declare_parameter("tag_frame", "tag9");
     tag_id_ = declare_parameter("tag_id", 9);
@@ -76,14 +74,13 @@ public:
     retry_delay_ = declare_parameter("retry_delay", 1.0);
     command_timeout_ = declare_parameter("command_timeout", 0.20);
     collision_stop_timeout_ = declare_parameter("collision_stop_timeout", 1.0);
-    odometry_timeout_ = declare_parameter("odometry_timeout", 0.50);
-    settled_linear_velocity_ = declare_parameter("settled_linear_velocity", 0.03);
-    settled_angular_velocity_ = declare_parameter("settled_angular_velocity", 0.05);
     const auto settled_sample_count = declare_parameter("settled_sample_count", 3);
     if (settled_sample_count < 1) {
       throw std::invalid_argument("settled_sample_count must be positive");
     }
     settling_duration_ = declare_parameter("settling_duration", 0.5);
+    settling_position_spread_ = declare_parameter("settling_position_spread", 0.02);
+    settling_angular_spread_ = declare_parameter("settling_angular_spread", 0.034906585);
     tracking_timeout_ = declare_parameter("tracking_timeout", 1.2);
     filter_time_constant_ = declare_parameter("tag_filter_time_constant", 0.15);
     motion_config_.position_hysteresis = declare_parameter("position_hysteresis", 0.02);
@@ -98,8 +95,6 @@ public:
     progress_log_interval_ = declare_parameter("progress_log_interval", 1.0);
     undock_distance_ = declare_parameter("undock_distance", 0.30);
     undock_timeout_ = declare_parameter("undock_timeout", 10.0);
-    undock_position_jump_ = declare_parameter("undock_position_jump", 0.2);
-    undock_yaw_jump_ = declare_parameter("undock_yaw_jump", 0.3);
 
     controller_config_.translation_gain = declare_parameter("translation_gain", 0.5);
     controller_config_.yaw_gain = declare_parameter("yaw_gain", 1.0);
@@ -132,15 +127,12 @@ public:
       !std::isfinite(reverse_capture_distance_) || reverse_capture_distance_ <= 0.0 ||
       !std::isfinite(retry_delay_) || retry_delay_ < 0.0 ||
       !std::isfinite(progress_log_interval_) || progress_log_interval_ <= 0.0 ||
-      !std::isfinite(odometry_timeout_) || odometry_timeout_ <= 0.0 ||
-      !std::isfinite(settled_linear_velocity_) || settled_linear_velocity_ < 0.0 ||
-      !std::isfinite(settled_angular_velocity_) || settled_angular_velocity_ < 0.0 ||
       !std::isfinite(undock_distance_) || undock_distance_ <= 0.0 ||
       undock_controller_config_.translation_speed_max > 0.5 ||
       undock_controller_config_.angular_speed_max > 1.0 ||
       !std::isfinite(undock_timeout_) || undock_timeout_ <= 0.0 ||
-      !std::isfinite(undock_position_jump_) || undock_position_jump_ <= 0.0 ||
-      !std::isfinite(undock_yaw_jump_) || undock_yaw_jump_ <= 0.0 ||
+      !std::isfinite(settling_position_spread_) || settling_position_spread_ <= 0.0 ||
+      !std::isfinite(settling_angular_spread_) || settling_angular_spread_ <= 0.0 ||
       !std::isfinite(settling_duration_) || settling_duration_ <= 0.0 ||
       !std::isfinite(tracking_timeout_) || tracking_timeout_ <= 0.0 ||
       !std::isfinite(filter_time_constant_) || filter_time_constant_ < 0.0 ||
@@ -156,7 +148,8 @@ public:
     tracker_ = std::make_unique<RelativeTagTracker>(TagTrackingConfig{
       stable_sample_count_, std::min(tracking_timeout_, maximum_pose_age_), filter_time_constant_,
       maximum_position_spread_, maximum_angular_spread_,
-      controller_config_.translation_speed_max, controller_config_.angular_speed_max});
+      std::max(controller_config_.translation_speed_max, undock_controller_config_.translation_speed_max),
+      std::max(controller_config_.angular_speed_max, undock_controller_config_.angular_speed_max)});
     RCLCPP_INFO(
       get_logger(),
       "Docking uses timestamped %s <- %s; tracking_timeout=%.3f s; settling_duration=%.3f s; "
@@ -170,7 +163,6 @@ public:
 
     const auto nav_cmd_topic = declare_parameter("nav_cmd_topic", "/cmd_vel_nav");
     const auto raw_cmd_topic = declare_parameter("raw_cmd_topic", "/cmd_vel_raw");
-    const auto odom_topic = declare_parameter("odom_topic", "/odom");
     const auto detections_topic = declare_parameter(
       "detections_topic", "/front_center_rectify/detections");
 
@@ -185,22 +177,6 @@ public:
       [this](agibot_x2_manipulation_msgs::msg::ManipulationState::SharedPtr message) {
         std::lock_guard<std::mutex> lock(measurement_mutex_);
         manipulation_state_ = message->state;
-      });
-    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-      odom_topic, rclcpp::SensorDataQoS(), [this](nav_msgs::msg::Odometry::SharedPtr message) {
-        std::lock_guard<std::mutex> lock(odometry_mutex_);
-        linear_velocity_ = std::hypot(message->twist.twist.linear.x, message->twist.twist.linear.y);
-        angular_velocity_ = std::abs(message->twist.twist.angular.z);
-        odometry_x_ = message->pose.pose.position.x;
-        odometry_y_ = message->pose.pose.position.y;
-        const auto & orientation = message->pose.pose.orientation;
-        const double yaw_sine = 2.0 *
-          (orientation.w * orientation.z + orientation.x * orientation.y);
-        const double yaw_cosine = 1.0 - 2.0 *
-          (orientation.y * orientation.y + orientation.z * orientation.z);
-        odometry_yaw_ = std::atan2(yaw_sine, yaw_cosine);
-        ++odometry_sequence_;
-        odometry_received_at_ = std::chrono::steady_clock::now();
       });
     nav_status_sub_ = create_subscription<action_msgs::msg::GoalStatusArray>(
       "/navigate_to_pose/_action/status", 10,
@@ -270,17 +246,6 @@ private:
     std::string message;
   };
 
-  struct OdometrySnapshot
-  {
-    double x;
-    double y;
-    double yaw;
-    double linear_velocity;
-    double angular_velocity;
-    std::uint64_t sequence;
-    double age;
-  };
-
   void processPendingDetection()
   {
     apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message;
@@ -341,11 +306,7 @@ private:
         return;
       }
       const auto filtered = tracker_->error();
-      Eigen::Isometry3d filtered_target = Eigen::Isometry3d::Identity();
-      filtered_target.translation().x() = filtered.x;
-      filtered_target.translation().y() = filtered.y;
-      filtered_target.linear() =
-        Eigen::AngleAxisd(filtered.yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      const auto filtered_target = planarPose(filtered);
       stable_target_ = filtered_target;
       raw_error_ = raw;
       stable_target_stamp_ = stamp;
@@ -526,7 +487,7 @@ private:
 
     alignment_active_.store(true);
     DockingMotionController motion_controller(controller_config_, motion_config_);
-    EvidenceSettling settling;
+    TagPoseSettling settling;
     const auto deadline = std::chrono::steady_clock::now() +
       std::chrono::duration<double>(approach_timeout_);
     const auto progress_log_period = std::max(
@@ -593,16 +554,10 @@ private:
         fineAlignAtGoal(raw_error, controller_config_);
       const bool command_stopped = command->linear.x == 0.0 && command->linear.y == 0.0 &&
         command->angular.z == 0.0;
-      OdometrySnapshot velocity{};
-      const bool odometry_available = odometrySnapshot(velocity);
-      const bool odometry_settled = odometry_available &&
-        velocity.linear_velocity <= settled_linear_velocity_ &&
-        velocity.angular_velocity <= settled_angular_velocity_;
       const bool settling_pose = at_goal && command_stopped;
       const bool completed = settling.update(
-        settling_pose && odometry_settled,
-        std::chrono::duration<double>(control_time.time_since_epoch()).count(),
-        sequence, velocity.sequence, settling_duration_);
+        settling_pose, std::chrono::duration<double>(control_time.time_since_epoch()).count(),
+        sequence, raw_error, settling_duration_, settling_position_spread_, settling_angular_spread_);
 
       const auto current_steady_time = std::chrono::steady_clock::now();
       if (current_steady_time >= next_progress_log) {
@@ -611,20 +566,16 @@ private:
           "Fine-align progress: attempt=%zu/%zu; sequence=%llu; "
           "error_base=(x=%.3f m, y=%.3f m, yaw=%.3f rad); "
           "command=(linear.x=%.3f m/s, linear.y=%.3f m/s, angular.z=%.3f rad/s); "
-          "stage=%s; odometry_settled=%s; settling_duration=%.3f s; "
+          "stage=%s; settling_duration=%.3f s; "
           "tag_age=%.3f s; raw_error=(%.3f, %.3f, %.3f); new_observation=%s; "
-          "pose_within_tolerance=%s; command_stopped=%s; odom_valid_fresh=%s; "
-          "odom_age=%.3f s; odom_linear=%.3f m/s; odom_angular=%.3f rad/s",
+          "pose_within_tolerance=%s; command_stopped=%s; tag_settled=%s",
           attempt, maximum_attempts, static_cast<unsigned long long>(sequence),
           error.x, error.y, error.yaw,
           command->linear.x, command->linear.y, command->angular.z,
-          settling_pose ? "settling" : "controlling", odometry_settled ? "true" : "false",
+          settling_pose ? "settling" : "controlling",
           settling_duration_, observation_age, raw_error.x, raw_error.y, raw_error.yaw,
           new_observation ? "true" : "false", at_goal ? "true" : "false",
-          command_stopped ? "true" : "false", odometry_available ? "true" : "false",
-          velocity.sequence == 0 ? std::numeric_limits<double>::quiet_NaN() : velocity.age,
-          velocity.sequence == 0 ? std::numeric_limits<double>::quiet_NaN() : velocity.linear_velocity,
-          velocity.sequence == 0 ? std::numeric_limits<double>::quiet_NaN() : velocity.angular_velocity);
+          command_stopped ? "true" : "false", completed ? "true" : "false");
         next_progress_log = current_steady_time + progress_log_period;
       }
 
@@ -714,23 +665,6 @@ private:
     }
   }
 
-  bool odometrySnapshot(OdometrySnapshot & snapshot, bool require_fresh = true) const
-  {
-    std::lock_guard<std::mutex> lock(odometry_mutex_);
-    if (!odometry_received_at_) {
-      return false;
-    }
-    snapshot = {
-      odometry_x_, odometry_y_, odometry_yaw_, linear_velocity_, angular_velocity_,
-      odometry_sequence_,
-      std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - *odometry_received_at_).count()};
-    const bool finite = std::isfinite(snapshot.x) && std::isfinite(snapshot.y) &&
-      std::isfinite(snapshot.yaw) && std::isfinite(snapshot.linear_velocity) &&
-      std::isfinite(snapshot.angular_velocity);
-    return finite && (!require_fresh || snapshot.age <= odometry_timeout_);
-  }
-
   uint8_t currentManipulationState() const
   {
     std::lock_guard<std::mutex> lock(measurement_mutex_);
@@ -741,8 +675,6 @@ private:
     const Undock::Result & result, uint16_t code, const std::string & message) const
   {
     constexpr double unavailable = std::numeric_limits<double>::quiet_NaN();
-    OdometrySnapshot odometry{};
-    const bool odometry_available = odometrySnapshot(odometry, false);
     bool collision_stopped = false;
     double collision_stop_age = unavailable;
     {
@@ -757,19 +689,11 @@ private:
       get_logger(),
       "Undock action abort: code=%u; reason='%s'; distance=(traveled=%.3f m, target=%.3f m); "
       "manipulation_state=(result=%u, current=%u); nav_active=%s; "
-      "collision_stopped=%s (age=%.3f s); odometry_%s=(age=%.3f s, x=%.3f m, y=%.3f m, "
-      "yaw=%.3f rad, linear=%.3f m/s, angular=%.3f rad/s)",
+      "collision_stopped=%s (age=%.3f s)",
       static_cast<unsigned int>(code), message.c_str(), result.distance_traveled,
       undock_distance_, static_cast<unsigned int>(result.manipulation_state),
       static_cast<unsigned int>(currentManipulationState()), nav_active_.load() ? "true" : "false",
-      collision_stopped ? "true" : "false", collision_stop_age,
-      odometry_available ? "available" : "unavailable",
-      odometry_available ? odometry.age : unavailable,
-      odometry_available ? odometry.x : unavailable,
-      odometry_available ? odometry.y : unavailable,
-      odometry_available ? odometry.yaw : unavailable,
-      odometry_available ? odometry.linear_velocity : unavailable,
-      odometry_available ? odometry.angular_velocity : unavailable);
+      collision_stopped ? "true" : "false", collision_stop_age);
   }
 
   void finishUndock(
@@ -812,151 +736,137 @@ private:
         "manipulation state is not EMPTY or HOLDING");
       return;
     }
-    OdometrySnapshot initial{};
-    if (!odometrySnapshot(initial)) {
-      finishUndock(
-        handle, result, Undock::Result::ODOMETRY_UNAVAILABLE,
-        "fresh finite odometry is unavailable");
+    Eigen::Isometry3d initial;
+    uint8_t state = result->manipulation_state;
+    std::uint64_t sequence = 0;
+    const auto acquisition_deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(acquisition_timeout_);
+    while (rclcpp::ok() && !stableMeasurement(initial, state, sequence)) {
+      if (handle->is_canceling() || nav_active_.load() || collisionStopTimedOut() ||
+        !validState(currentManipulationState()))
+      {
+        finishUndock(handle, result,
+          handle->is_canceling() ? Undock::Result::CANCELED :
+          nav_active_.load() ? Undock::Result::NAVIGATION_ACTIVE :
+          !validState(currentManipulationState()) ? Undock::Result::INVALID_STATE :
+          Undock::Result::COLLISION_STOPPED, "undock acquisition interrupted");
+        return;
+      }
+      if (std::chrono::steady_clock::now() >= acquisition_deadline) {
+        finishUndock(handle, result, Undock::Result::NO_STABLE_TAG,
+          "no fresh stable tag for undocking");
+        return;
+      }
+      handle->publish_feedback(validating);
+      std::this_thread::sleep_for(controller_period_);
+    }
+    if (!rclcpp::ok()) {
+      finishUndock(handle, result, Undock::Result::SAFETY_ABORT,
+        "ROS shutdown interrupted undock acquisition");
       return;
     }
-
     alignment_active_.store(true);
+    DockingMotionController motion_controller(undock_controller_config_, motion_config_);
+    TagPoseSettling settling;
     const auto deadline = std::chrono::steady_clock::now() +
       std::chrono::duration<double>(undock_timeout_);
-    const auto progress_log_period = std::max(
-      controller_period_, std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::duration<double>(progress_log_interval_)));
+    auto previous_control_time = std::chrono::steady_clock::now();
     auto next_progress_log = std::chrono::steady_clock::time_point::min();
-    EvidenceSettling settling;
-    auto previous_odom = initial;
-    auto previous_odom_time = std::chrono::steady_clock::now();
-    const double target_x = initial.x - undock_distance_ * std::cos(initial.yaw);
-    const double target_y = initial.y - undock_distance_ * std::sin(initial.yaw);
-
+    std::uint64_t checked_sequence = 0;
     while (rclcpp::ok()) {
-      if (handle->is_canceling()) {
-        finishUndock(handle, result, Undock::Result::CANCELED, "undocking canceled");
+      if (handle->is_canceling() || nav_active_.load() || collisionStopTimedOut()) {
+        finishUndock(handle, result,
+          handle->is_canceling() ? Undock::Result::CANCELED :
+          nav_active_.load() ? Undock::Result::NAVIGATION_ACTIVE : Undock::Result::COLLISION_STOPPED,
+          "undocking interrupted by cancellation, navigation, or collision stop");
         return;
       }
-      if (nav_active_.load()) {
-        finishUndock(
-          handle, result, Undock::Result::NAVIGATION_ACTIVE, "Nav2 became active");
-        return;
-      }
-      if (collisionStopTimedOut()) {
-        finishUndock(
-          handle, result, Undock::Result::COLLISION_STOPPED,
-          "collision monitor stop persisted");
-        return;
-      }
-      if (std::chrono::steady_clock::now() > deadline) {
+      if (std::chrono::steady_clock::now() >= deadline) {
         finishUndock(handle, result, Undock::Result::UNDOCK_TIMEOUT, "undocking timed out");
         return;
       }
-      result->manipulation_state = currentManipulationState();
-      if (!validState(result->manipulation_state)) {
-        finishUndock(
-          handle, result, Undock::Result::INVALID_STATE,
+      Eigen::Isometry3d current;
+      PlanarError raw;
+      double age = 0.0;
+      if (!stableMeasurement(current, state, sequence, &raw, &age)) {
+        finishUndock(handle, result, Undock::Result::NO_STABLE_TAG,
+          "tag became unavailable or stale during undocking");
+        return;
+      }
+      result->manipulation_state = state;
+      if (!validState(state)) {
+        finishUndock(handle, result, Undock::Result::INVALID_STATE,
           "manipulation state became invalid during undocking");
         return;
       }
-
-      OdometrySnapshot current{};
-      if (!odometrySnapshot(current)) {
-        finishUndock(
-          handle, result, Undock::Result::ODOMETRY_UNAVAILABLE,
-          "odometry became stale or non-finite during undocking");
+      const auto target = tagRelativeUndockTarget(initial, current, undock_distance_);
+      const auto error = planarError(Eigen::Isometry3d::Identity(), target);
+      const auto raw_target = tagRelativeUndockTarget(initial, planarPose(raw), undock_distance_);
+      const auto raw_error = planarError(Eigen::Isometry3d::Identity(), raw_target);
+      const auto robot_from_initial = initial * planarPose(raw).inverse();
+      result->distance_traveled = std::max(0.0, -robot_from_initial.translation().x());
+      const auto control_time = std::chrono::steady_clock::now();
+      const double dt = std::chrono::duration<double>(control_time - previous_control_time).count();
+      previous_control_time = control_time;
+      const auto command = motion_controller.update(error, dt, sequence != checked_sequence);
+      checked_sequence = sequence;
+      if (!command) {
+        finishUndock(handle, result, Undock::Result::SAFETY_ABORT,
+          "controller rejected tag-relative undocking error");
         return;
       }
-      const auto odom_time = std::chrono::steady_clock::now();
-      if (current.sequence != previous_odom.sequence) {
-        const double dt = std::chrono::duration<double>(odom_time - previous_odom_time).count();
-        if (std::hypot(current.x - previous_odom.x, current.y - previous_odom.y) >
-          undock_position_jump_ + undock_controller_config_.translation_speed_max * dt ||
-          std::abs(wrapAngle(current.yaw - previous_odom.yaw)) >
-          undock_yaw_jump_ + undock_controller_config_.angular_speed_max * dt)
-        {
-          finishUndock(handle, result, Undock::Result::ODOMETRY_UNAVAILABLE,
-            "odometry pose jumped during undocking");
-          return;
-        }
-        previous_odom = current;
-        previous_odom_time = odom_time;
-      }
-      const double delta_x = current.x - initial.x;
-      const double delta_y = current.y - initial.y;
-      const double projected_backward =
-        -(delta_x * std::cos(initial.yaw) + delta_y * std::sin(initial.yaw));
-      result->distance_traveled = std::max(0.0, projected_backward);
-
-      const double target_delta_x = target_x - current.x;
-      const double target_delta_y = target_y - current.y;
-      const PlanarError error{
-        std::cos(current.yaw) * target_delta_x + std::sin(current.yaw) * target_delta_y,
-        -std::sin(current.yaw) * target_delta_x + std::cos(current.yaw) * target_delta_y,
-        wrapAngle(initial.yaw - current.yaw)};
-      const bool target_reached = fineAlignAtGoal(error, undock_controller_config_);
-
-      geometry_msgs::msg::Twist command;
-      if (!target_reached) {
-        const auto selected_command = holonomicFineAlignCommand(error, undock_controller_config_);
-        if (!selected_command) {
-          finishUndock(
-            handle, result, Undock::Result::SAFETY_ABORT,
-            "holonomic controller rejected the undocking error");
-          return;
-        }
-        command = *selected_command;
-      }
+      const bool at_goal = fineAlignAtGoal(error, undock_controller_config_) &&
+        fineAlignAtGoal(raw_error, undock_controller_config_);
+      const bool command_stopped = command->linear.x == 0.0 && command->linear.y == 0.0 &&
+        command->angular.z == 0.0;
+      const bool settling_pose = at_goal && command_stopped;
       const bool completed = settling.update(
-        target_reached && current.linear_velocity <= settled_linear_velocity_ &&
-        current.angular_velocity <= settled_angular_velocity_,
-        std::chrono::duration<double>(odom_time.time_since_epoch()).count(),
-        current.sequence, current.sequence, settling_duration_);
+        settling_pose, std::chrono::duration<double>(control_time.time_since_epoch()).count(),
+        sequence, raw, settling_duration_, settling_position_spread_, settling_angular_spread_);
       {
         std::lock_guard<std::mutex> lock(command_mutex_);
-        alignment_command_ = command;
-        alignment_command_time_ = std::chrono::steady_clock::now();
+        alignment_command_ = *command;
+        alignment_command_time_ = control_time;
       }
-
       const double remaining = std::max(0.0, undock_distance_ - result->distance_traveled);
-      const auto current_steady_time = std::chrono::steady_clock::now();
-      if (current_steady_time >= next_progress_log) {
-        RCLCPP_INFO(
-          get_logger(),
+      if (control_time >= next_progress_log) {
+        RCLCPP_INFO(get_logger(),
           "Undock progress: distance=(traveled=%.3f m, remaining=%.3f m, target=%.3f m); "
+          "error_base=(x=%.3f m, y=%.3f m, yaw=%.3f rad); "
           "command=(linear.x=%.3f m/s, linear.y=%.3f m/s, angular.z=%.3f rad/s); "
-          "odometry=(linear=%.3f m/s, angular=%.3f rad/s); stage=%s; settling_duration=%.3f s",
-          result->distance_traveled, remaining, undock_distance_, command.linear.x,
-          command.linear.y, command.angular.z, current.linear_velocity, current.angular_velocity,
-          target_reached ? "settling" : "moving", settling_duration_);
-        next_progress_log = current_steady_time + progress_log_period;
+          "tag_age=%.3f s; sequence=%llu; pose_within_tolerance=%s; command_stopped=%s; "
+          "stage=%s; tag_settled=%s",
+          result->distance_traveled, remaining, undock_distance_, error.x, error.y, error.yaw,
+          command->linear.x, command->linear.y, command->angular.z, age,
+          static_cast<unsigned long long>(sequence), at_goal ? "true" : "false",
+          command_stopped ? "true" : "false", settling_pose ? "settling" : "moving",
+          completed ? "true" : "false");
+        next_progress_log = control_time + std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::duration<double>(progress_log_interval_));
       }
-
       auto feedback = std::make_shared<Undock::Feedback>();
-      feedback->stage = target_reached ? Undock::Feedback::SETTLING : Undock::Feedback::MOVING;
+      feedback->stage = settling_pose ? Undock::Feedback::SETTLING : Undock::Feedback::MOVING;
       feedback->distance_traveled = result->distance_traveled;
       feedback->distance_remaining = remaining;
-      feedback->commanded_speed = command.linear.x;
-      feedback->commanded_lateral_speed = command.linear.y;
-      feedback->commanded_yaw_speed = command.angular.z;
+      feedback->commanded_speed = command->linear.x;
+      feedback->commanded_lateral_speed = command->linear.y;
+      feedback->commanded_yaw_speed = command->angular.z;
       feedback->progress = static_cast<float>(
         std::min(1.0, result->distance_traveled / undock_distance_));
       handle->publish_feedback(feedback);
-
       if (completed) {
         stopAlignment();
         result->success = true;
         result->error_code = Undock::Result::SUCCESS;
-        result->message = "undocking succeeded";
+        result->message = "tag-relative undocking succeeded";
         handle->succeed(result);
         operation_active_.store(false);
         return;
       }
       std::this_thread::sleep_for(controller_period_);
     }
-    finishUndock(
-      handle, result, Undock::Result::SAFETY_ABORT, "ROS shutdown interrupted undocking");
+    finishUndock(handle, result, Undock::Result::SAFETY_ABORT,
+      "ROS shutdown interrupted undocking");
   }
 
   void stopAlignment()
@@ -1010,21 +920,6 @@ private:
       }
     }
 
-    bool odometry_available = false;
-    double odometry_age = unavailable;
-    double linear_velocity = unavailable;
-    double angular_velocity = unavailable;
-    {
-      std::lock_guard<std::mutex> lock(odometry_mutex_);
-      odometry_available = odometry_received_at_.has_value();
-      if (odometry_available) {
-        odometry_age = std::chrono::duration<double>(
-          current_steady_time - *odometry_received_at_).count();
-        linear_velocity = linear_velocity_;
-        angular_velocity = angular_velocity_;
-      }
-    }
-
     RCLCPP_ERROR(
       get_logger(),
       "Fine-align action abort: code=%u; reason='%s'; execute=%s; "
@@ -1032,8 +927,7 @@ private:
       "manipulation_state=(result=%u, current=%u); "
       "stable_target_%s=(sequence=%llu, x=%.3f m, y=%.3f m, yaw=%.3f rad, "
       "age=%.3f s, frame=%s); nav_active=%s; "
-      "collision_stopped=%s (age=%.3f s); odometry_%s=(age=%.3f s, "
-      "linear=%.3f m/s, angular=%.3f rad/s)",
+      "collision_stopped=%s (age=%.3f s)",
       static_cast<unsigned int>(code), message.c_str(),
       handle->get_goal()->execute ? "true" : "false",
       result.final_error.x, result.final_error.y, result.final_error.theta,
@@ -1043,8 +937,7 @@ private:
       static_cast<unsigned long long>(stable_target_sequence), stable_target_x, stable_target_y,
       stable_target_yaw, stable_target_age, base_frame_.c_str(),
       nav_active_.load() ? "true" : "false", collision_stopped ? "true" : "false",
-      collision_stop_age, odometry_available ? "available" : "unavailable", odometry_age,
-      linear_velocity, angular_velocity);
+      collision_stop_age);
   }
 
   void finish(
@@ -1109,7 +1002,6 @@ private:
   rclcpp_action::Server<Undock>::SharedPtr undock_server_;
   rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_sub_;
   rclcpp::Subscription<agibot_x2_manipulation_msgs::msg::ManipulationState>::SharedPtr state_sub_;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr nav_status_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_cmd_sub_;
   rclcpp::Subscription<nav2_msgs::msg::CollisionMonitorState>::SharedPtr collision_sub_;
@@ -1123,21 +1015,20 @@ private:
   PlanarError raw_error_;
   DockingMotionConfig motion_config_;
   double settling_duration_, tracking_timeout_, filter_time_constant_;
-  mutable std::mutex measurement_mutex_, command_mutex_, collision_mutex_, odometry_mutex_;
+  double settling_position_spread_, settling_angular_spread_;
+  mutable std::mutex measurement_mutex_, command_mutex_, collision_mutex_;
   std::optional<Eigen::Isometry3d> stable_target_;
   rclcpp::Time last_sample_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Time stable_target_stamp_{0, 0, RCL_ROS_TIME};
   std::uint64_t stable_target_sequence_{0};
-  std::uint64_t odometry_sequence_{0};
   uint8_t manipulation_state_{agibot_x2_manipulation_msgs::msg::ManipulationState::UNKNOWN};
   geometry_msgs::msg::Twist nav_command_, alignment_command_;
   std::optional<std::chrono::steady_clock::time_point> nav_command_time_;
   std::optional<std::chrono::steady_clock::time_point> alignment_command_time_;
   std::optional<std::chrono::steady_clock::time_point> collision_stop_since_;
-  std::optional<std::chrono::steady_clock::time_point> odometry_received_at_;
   std::atomic_bool operation_active_{false}, alignment_active_{false}, nav_active_{false};
   bool collision_stopped_{false};
-  std::string fixed_frame_, base_frame_, tag_frame_;
+  std::string base_frame_, tag_frame_;
   int tag_id_{9};
   std::size_t stable_sample_count_{3}, maximum_retries_{2};
   HolonomicFineAlignConfig controller_config_, undock_controller_config_;
@@ -1147,10 +1038,8 @@ private:
   double capture_distance_, capture_lateral_, capture_yaw_, reverse_capture_distance_;
   double acquisition_timeout_, approach_timeout_, retry_delay_, command_timeout_;
   double collision_stop_timeout_;
-  double odometry_timeout_, settled_linear_velocity_, settled_angular_velocity_, progress_log_interval_;
-  double undock_distance_, undock_timeout_, undock_position_jump_, undock_yaw_jump_;
-  double odometry_x_{0.0}, odometry_y_{0.0}, odometry_yaw_{0.0};
-  double linear_velocity_{0.0}, angular_velocity_{0.0};
+  double progress_log_interval_;
+  double undock_distance_, undock_timeout_;
 };
 
 }  // namespace x2_navigation

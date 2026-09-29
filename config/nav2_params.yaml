@@ -117,6 +117,7 @@ controller_server:
 fine_align_server:
   ros__parameters:
     use_sim_time: false
+    # Legacy settings retained for compatibility; unused by the tag-only server.
     fixed_frame: odom
     base_frame: base_link
     odom_topic: /odom
@@ -138,6 +139,8 @@ fine_align_server:
     yaw_hysteresis: 0.034906585
     direction_change_rate: 1.0
     settling_duration: 0.5
+    settling_position_spread: 0.1
+    settling_angular_spread: 0.174532925
     maximum_position_spread: 0.1
     maximum_angular_spread: 0.174532925
     capture_distance: 1.5
@@ -151,11 +154,13 @@ fine_align_server:
     retry_delay: 1.0
     command_timeout: 0.2
     collision_stop_timeout: 1.0
+    # Legacy odometry settings are ignored; navigation still uses /odom.
     odometry_timeout: 0.5
     controller_frequency: 20.0
     progress_log_interval: 1.0
     undock_distance: 0.3
     undock_timeout: 10.0
+    # Legacy odometry jump guards are unused by tag-relative undocking.
     undock_position_jump: 0.2
     undock_yaw_jump: 0.3
     undock_translation_speed_min: 0.1
@@ -172,6 +177,7 @@ fine_align_server:
     x_position_tolerance: 0.1
     y_position_tolerance: 0.1
     yaw_tolerance: 0.174532925
+    # Legacy measured-velocity limits are ignored; visual settling uses spread limits.
     settled_linear_velocity: 0.05
     settled_angular_velocity: 0.05
     settled_sample_count: 3
