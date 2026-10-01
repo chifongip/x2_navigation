@@ -108,8 +108,42 @@ interface. Cancellation, persistent collision stop, Nav2 activation, invalid
 manipulation state, timeout, and ROS shutdown also command zero. The tag must
 remain visible throughout retreat; there is no blind odometry or timed fallback.
 
-Nav2 publishes `/cmd_vel_nav`; the fine-align server selects either navigation or
-its internal alignment command. Planar speed is bounded by the configured vector
+Nav2 publishes `/cmd_vel_nav`. The lifecycle-managed `velocity_smoother` consumes
+that stream and publishes `/cmd_vel_nav_smoothed`; the fine-align server selects
+either this smoothed navigation command or its internal alignment command. Its
+output `/cmd_vel_raw` passes through Collision Monitor to `/cmd_vel`, which the
+ZMQ bridge forwards to RoboJuDo. Collision Monitor is downstream of smoothing,
+so collision stops are immediate. Fine-align and undock commands bypass smoothing.
+
+The smoother uses `OPEN_LOOP` feedback: it limits changes relative to its previous
+command without requiring reliable measured velocity from LiDAR odometry. The
+initial trial limits are 0.3 m/s² linear and 0.3 rad/s² angular acceleration,
+with deceleration magnitudes of 0.5 m/s² and 0.5 rad/s². At 20 Hz, angular changes
+are limited to 0.015 rad/s per accelerating update and 0.025 rad/s per decelerating
+update. Velocity bounds match DWB: x is -0.2 to 0.5 m/s, y is zero, and yaw is
+-1.0 to 1.0 rad/s. Tune the `velocity_smoother` block through `params_file`; DWB,
+odometry, and docking parameters are unchanged. This limits acceleration, not jerk.
+
+Arbitration independently monitors the original and smoothed streams with its
+existing 0.20 s steady-clock command timeout. Continued smoother output cannot
+extend a lost Nav2 command's lifetime. Explicit all-zero original commands and
+non-finite input invalidate the navigation cache; arbitration publishes zero at
+its next 20 Hz update. These stop overrides are exempt from acceleration limits.
+Resumption requires a new valid nonzero original command followed by a fresh
+smoothed command. Collision Monitor and the ZMQ watchdog retain their stop rules.
+For standalone `fine_align_server` usage, `nav_raw_cmd_topic` defaults to empty,
+preserving the previous single-input behavior. The navigation launch sets this
+parameter to `nav_cmd_topic` and sets the arbitration input to
+`smoothed_nav_cmd_topic`. Both launch topic arguments may be overridden.
+
+Validate the full command chain in simulation before hardware motion. Compare
+`/cmd_vel_nav`, `/cmd_vel_nav_smoothed`, `/cmd_vel_raw`, and `/cmd_vel` for alternating
+0.1/0.7 rad/s yaw requests, reversals, goal stops, controller input loss, and
+collision stops. Check tracking and stopping distance when choosing gentler limits;
+command smoothing does not correct noisy or delayed odometry. The low-level gait
+controller must be able to follow the configured limits.
+
+Fine-align planar speed is bounded by the configured vector
 magnitude, rather than independently on x and y. Setting translation minimum and
 maximum to 0.1 preserves a 0.1 m/s moving command; setting angular minimum and
 maximum to 0.1 preserves a 0.1 rad/s rotating command. Gains and speed limits are

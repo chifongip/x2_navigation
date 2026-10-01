@@ -114,6 +114,37 @@ def test_navigation_velocity_zmq_bridge_settings():
     }
 
 
+def test_navigation_velocity_smoothing_configuration_and_wiring():
+    configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
+    smoother = configuration["velocity_smoother"]["ros__parameters"]
+    assert smoother == {
+        "use_sim_time": False,
+        "smoothing_frequency": 20.0,
+        "feedback": "OPEN_LOOP",
+        "scale_velocities": False,
+        "max_velocity": [0.5, 0.0, 1.0],
+        "min_velocity": [-0.2, 0.0, -1.0],
+        "max_accel": [0.3, 0.0, 0.3],
+        "max_decel": [-0.5, 0.0, -0.5],
+        "deadband_velocity": [0.0, 0.0, 0.0],
+        "velocity_timeout": 0.2,
+    }
+    assert "nav2_velocity_smoother" in {
+        dependency.text for dependency in ET.parse(PACKAGE_XML).getroot().findall("exec_depend")
+    }
+    source = LAUNCH_FILE.read_text(encoding="utf-8")
+    assert 'package="nav2_velocity_smoother"' in source
+    assert 'default_value="/cmd_vel_nav_smoothed"' in source
+    assert '("cmd_vel", nav_cmd_topic)' in source
+    assert '("cmd_vel_smoothed", smoothed_nav_cmd_topic)' in source
+    assert '"nav_cmd_topic": smoothed_nav_cmd_topic' in source
+    assert '"nav_raw_cmd_topic": nav_cmd_topic' in source
+    lifecycle_nodes = source.split("lifecycle_nodes = [", 1)[1].split("]", 1)[0]
+    assert lifecycle_nodes.index('"velocity_smoother"') < lifecycle_nodes.index(
+        '"controller_server"'
+    )
+
+
 def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
 

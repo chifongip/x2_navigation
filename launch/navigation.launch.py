@@ -19,6 +19,7 @@ def generate_launch_description():
     autostart = LaunchConfiguration("autostart")
     velocity_topic = LaunchConfiguration("velocity_topic")
     nav_cmd_topic = LaunchConfiguration("nav_cmd_topic")
+    smoothed_nav_cmd_topic = LaunchConfiguration("smoothed_nav_cmd_topic")
     raw_cmd_topic = LaunchConfiguration("raw_cmd_topic")
     velocity_zmq_endpoint = LaunchConfiguration("velocity_zmq_endpoint")
     velocity_publish_rate_hz = LaunchConfiguration("velocity_publish_rate_hz")
@@ -48,6 +49,7 @@ def generate_launch_description():
     lifecycle_nodes = [
         "map_server",
         "planner_server",
+        "velocity_smoother",
         "controller_server",
         "behavior_server",
         "bt_navigator",
@@ -91,7 +93,12 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "nav_cmd_topic",
                 default_value="/cmd_vel_nav",
-                description="Twist output from Nav2 controller_server into fine-align arbitration.",
+                description="Original Twist output from Nav2 into velocity smoothing.",
+            ),
+            DeclareLaunchArgument(
+                "smoothed_nav_cmd_topic",
+                default_value="/cmd_vel_nav_smoothed",
+                description="Smoothed navigation Twist consumed by fine-align arbitration.",
             ),
             DeclareLaunchArgument(
                 "raw_cmd_topic",
@@ -305,6 +312,17 @@ def generate_launch_description():
                 remappings=[("cmd_vel", nav_cmd_topic)],
             ),
             Node(
+                package="nav2_velocity_smoother",
+                executable="velocity_smoother",
+                name="velocity_smoother",
+                output="screen",
+                parameters=[configured_params],
+                remappings=[
+                    ("cmd_vel", nav_cmd_topic),
+                    ("cmd_vel_smoothed", smoothed_nav_cmd_topic),
+                ],
+            ),
+            Node(
                 package="nav2_behaviors",
                 executable="behavior_server",
                 name="behavior_server",
@@ -348,7 +366,8 @@ def generate_launch_description():
                 parameters=[
                     configured_params,
                     {
-                        "nav_cmd_topic": nav_cmd_topic,
+                        "nav_cmd_topic": smoothed_nav_cmd_topic,
+                        "nav_raw_cmd_topic": nav_cmd_topic,
                         "raw_cmd_topic": raw_cmd_topic,
                     },
                 ],

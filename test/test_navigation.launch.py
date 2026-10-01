@@ -55,6 +55,8 @@ def generate_test_description():
             "rviz": "false",
             "lidar_pointcloud_topic": "/test/lidar_pointcloud",
             "velocity_zmq_endpoint": "tcp://127.0.0.1:18561",
+            "nav_cmd_topic": "/test/navigation/original",
+            "smoothed_nav_cmd_topic": "/test/navigation/smoothed",
         }.items(),
     )
     return launch.LaunchDescription(
@@ -239,9 +241,11 @@ class TestNavigationLifecycle(unittest.TestCase):
         for node_name in (
             "map_server",
             "planner_server",
+            "velocity_smoother",
             "controller_server",
             "behavior_server",
             "bt_navigator",
+            "collision_monitor",
         ):
             with self.subTest(node_name=node_name):
                 self.wait_for_active_lifecycle_node(node_name)
@@ -257,6 +261,30 @@ class TestNavigationLifecycle(unittest.TestCase):
         self.assertEqual(map_message.info.width, 1014)
         self.assertEqual(map_message.info.height, 799)
         self.assertAlmostEqual(map_message.info.resolution, 0.05, places=6)
+
+    def test_custom_navigation_command_topics_are_connected(self):
+        self.wait_for_active_lifecycle_node("velocity_smoother")
+        raw_subscribers = {
+            endpoint.node_name
+            for endpoint in self.node.get_subscriptions_info_by_topic(
+                "/test/navigation/original"
+            )
+        }
+        self.assertTrue({"velocity_smoother", "fine_align_server"} <= raw_subscribers)
+        smooth_subscribers = {
+            endpoint.node_name
+            for endpoint in self.node.get_subscriptions_info_by_topic(
+                "/test/navigation/smoothed"
+            )
+        }
+        self.assertIn("fine_align_server", smooth_subscribers)
+        smooth_publishers = {
+            endpoint.node_name
+            for endpoint in self.node.get_publishers_info_by_topic(
+                "/test/navigation/smoothed"
+            )
+        }
+        self.assertEqual(smooth_publishers, {"velocity_smoother"})
 
     def test_raw_lidar_cloud_is_filtered_for_navigation(self):
         cloud = PointCloud2()

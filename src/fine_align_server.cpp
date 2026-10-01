@@ -1,4 +1,5 @@
 #include "x2_navigation/docking_tracking.hpp"
+#include "x2_navigation/navigation_command_gate.hpp"
 #include "x2_navigation/table_dock_geometry.hpp"
 
 #include <algorithm>
@@ -162,6 +163,8 @@ public:
       std::chrono::duration<double>(1.0 / controller_frequency));
 
     const auto nav_cmd_topic = declare_parameter("nav_cmd_topic", "/cmd_vel_nav");
+    const auto nav_raw_cmd_topic = declare_parameter("nav_raw_cmd_topic", "");
+    nav_command_gate_ = NavigationCommandGate(!nav_raw_cmd_topic.empty());
     const auto raw_cmd_topic = declare_parameter("raw_cmd_topic", "/cmd_vel_raw");
     const auto detections_topic = declare_parameter(
       "detections_topic", "/front_center_rectify/detections");
@@ -192,9 +195,20 @@ public:
     nav_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
       nav_cmd_topic, 10, [this](geometry_msgs::msg::Twist::SharedPtr message) {
         std::lock_guard<std::mutex> lock(command_mutex_);
-        nav_command_ = *message;
-        nav_command_time_ = std::chrono::steady_clock::now();
+        nav_command_gate_.update(
+          *message, std::chrono::steady_clock::now(),
+          std::chrono::duration<double>(command_timeout_));
       });
+    if (!nav_raw_cmd_topic.empty()) {
+      nav_raw_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
+        nav_raw_cmd_topic, rclcpp::QoS(1),
+        [this](geometry_msgs::msg::Twist::SharedPtr message) {
+          std::lock_guard<std::mutex> lock(command_mutex_);
+          nav_command_gate_.updateRaw(
+            *message, std::chrono::steady_clock::now(),
+            std::chrono::duration<double>(command_timeout_));
+        });
+    }
     collision_sub_ = create_subscription<nav2_msgs::msg::CollisionMonitorState>(
       "/collision_monitor_state", 10,
       [this](nav2_msgs::msg::CollisionMonitorState::SharedPtr message) {
@@ -982,10 +996,9 @@ private:
       {
         command = alignment_command_;
       }
-    } else if (nav_command_time_ &&
-      std::chrono::duration<double>(now_steady - *nav_command_time_).count() <= command_timeout_)
-    {
-      command = nav_command_;
+    } else {
+      command = nav_command_gate_.commandAt(
+        now_steady, std::chrono::duration<double>(command_timeout_));
     }
     raw_cmd_pub_->publish(command);
   }
@@ -1004,6 +1017,8 @@ private:
   rclcpp::Subscription<agibot_x2_manipulation_msgs::msg::ManipulationState>::SharedPtr state_sub_;
   rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr nav_status_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_cmd_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_raw_cmd_sub_;
+  NavigationCommandGate nav_command_gate_;
   rclcpp::Subscription<nav2_msgs::msg::CollisionMonitorState>::SharedPtr collision_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr raw_cmd_pub_;
   rclcpp::TimerBase::SharedPtr mux_timer_;
@@ -1022,8 +1037,7 @@ private:
   rclcpp::Time stable_target_stamp_{0, 0, RCL_ROS_TIME};
   std::uint64_t stable_target_sequence_{0};
   uint8_t manipulation_state_{agibot_x2_manipulation_msgs::msg::ManipulationState::UNKNOWN};
-  geometry_msgs::msg::Twist nav_command_, alignment_command_;
-  std::optional<std::chrono::steady_clock::time_point> nav_command_time_;
+  geometry_msgs::msg::Twist alignment_command_;
   std::optional<std::chrono::steady_clock::time_point> alignment_command_time_;
   std::optional<std::chrono::steady_clock::time_point> collision_stop_since_;
   std::atomic_bool operation_active_{false}, alignment_active_{false}, nav_active_{false};
