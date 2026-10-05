@@ -102,7 +102,13 @@ controller_server:
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist]
+      critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist, PreferForward]
+      # Prefer forward travel while retaining reverse motion when needed.
+      PreferForward.scale: 1.0
+      PreferForward.penalty: 10.0
+      PreferForward.theta_scale: 1.0
+      PreferForward.strafe_x: 0.05
+      PreferForward.strafe_theta: 0.2
       BaseObstacle.scale: 0.02
       PathAlign.scale: 24.0
       PathAlign.forward_point_distance: 0.15

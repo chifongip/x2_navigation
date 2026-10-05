@@ -41,6 +41,12 @@ def test_navigation_velocity_footprint_and_costmap_settings():
     assert controller["min_vel_theta"] == -1.0
     assert controller["max_vel_theta"] == 1.0
     assert controller["max_speed_theta"] == 1.0
+    assert "PreferForward" in controller["critics"]
+    assert controller["PreferForward.scale"] == 1.0
+    assert controller["PreferForward.penalty"] == 10.0
+    assert controller["PreferForward.theta_scale"] == 1.0
+    assert controller["PreferForward.strafe_x"] == 0.05
+    assert controller["PreferForward.strafe_theta"] == 0.2
 
     local_costmap = configuration["local_costmap"]["local_costmap"]["ros__parameters"]
     global_costmap = configuration["global_costmap"]["global_costmap"]["ros__parameters"]

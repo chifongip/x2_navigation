@@ -40,6 +40,12 @@ TF.
 ros2 launch x2_navigation navigation.launch.py
 ```
 
+DWB's `PreferForward` critic favors forward travel while retaining reverse motion
+when needed. The trial settings use penalty 10.0, scale 1.0, angular weight 1.0,
+and slow-motion thresholds of 0.05 m/s and 0.2 rad/s. Tune these under `FollowPath`
+in `nav2_params.yaml` and validate goals behind the robot, tight turns, and
+obstacle avoidance in simulation before hardware use.
+
 The stack forwards normal, unstamped `geometry_msgs/msg/Twist` commands from
 `/cmd_vel` to the RoboJuDo velocity interface. `nav2_zmq_velocity_bridge`
 binds `tcp://*:8558` and publishes full Twist-shaped JSON at 20 Hz. It clamps
