@@ -74,9 +74,9 @@ def test_navigation_velocity_footprint_and_costmap_settings():
         "clearing": True,
         "min_obstacle_height": -1.0,
         "max_obstacle_height": 2.0,
-        "obstacle_min_range": 0.20,
+        "obstacle_min_range": 0.10,
         "obstacle_max_range": 5.0,
-        "raytrace_min_range": 0.20,
+        "raytrace_min_range": 0.10,
         "raytrace_max_range": 5.5,
         "observation_persistence": 1.0,
     }
@@ -191,11 +191,12 @@ def test_navigation_filters_raw_lidar_for_pointcloud_costmap():
     assert 'package="pointcloud_to_laserscan"' in launch_source
     assert 'executable="pointcloud_to_laserscan_node"' in launch_source
     assert 'default_value="/scan_nav/laser"' in launch_source
-    assert 'derived from /scan_nav/self_filtered_cloud' in launch_source
+    assert 'derived from /scan_nav/payload_filtered_cloud' in launch_source
     assert '("cloud_in", "/scan_nav/payload_filtered_cloud")' in launch_source
     assert 'executable="payload_cloud_filter"' in launch_source
     assert '("scan", laser_scan_topic)' in launch_source
     assert '"laser_scan_range_min"' in launch_source
+    assert '"laser_scan_range_min",\n                default_value="0.10"' in launch_source
     assert '"laser_scan_range_max"' in launch_source
 
 

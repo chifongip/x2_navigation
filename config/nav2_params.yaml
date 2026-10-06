@@ -263,9 +263,9 @@ local_costmap:
           clearing: true
           min_obstacle_height: -1.0
           max_obstacle_height: 2.0
-          obstacle_min_range: 0.20
+          obstacle_min_range: 0.10
           obstacle_max_range: 5.0
-          raytrace_min_range: 0.20
+          raytrace_min_range: 0.10
           raytrace_max_range: 5.5
           observation_persistence: 1.0
       inflation_layer:
@@ -306,9 +306,9 @@ global_costmap:
           clearing: true
           min_obstacle_height: -1.0
           max_obstacle_height: 2.0
-          obstacle_min_range: 0.20
+          obstacle_min_range: 0.10
           obstacle_max_range: 5.0
-          raytrace_min_range: 0.20
+          raytrace_min_range: 0.10
           raytrace_max_range: 5.5
           observation_persistence: 1.0
       inflation_layer:

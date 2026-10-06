@@ -345,6 +345,8 @@ Both costmaps consume dynamic obstacles through this bounded pipeline:
   -> /scan_nav/ground_filtered_cloud (non-ground points)
   -> robot_self_filter (live X2 link TF plus collision-box proxy)
   -> /scan_nav/self_filtered_cloud
+  -> payload_cloud_filter (held-box returns removed while HOLDING)
+  -> /scan_nav/payload_filtered_cloud
      +-> pointcloud_to_laserscan -> /scan_nav/laser (panel visualization only)
      +-> local and global obstacle layers (marking and clearing)
 ```
@@ -363,8 +365,10 @@ newest received cloud from a 10 Hz timer, so callback arrival
 phase does not cause avoidable rate-gate misses. Each output still requires a
 fresh input cloud and a timestamp-valid transform. A reusable allocator avoids
 per-frame voxel storage churn, and `max_input_points` bounds work to 40,000
-uniformly sampled raw points per output. The costmap applies the 0.20-5.0 m
-obstacle ranges. `x2_self_filter.urdf` preserves the X2 kinematic tree and
+uniformly sampled raw points per output. Both costmaps use a 0.10 m minimum
+obstacle and raytracing range to match the E1R's specified blind-zone boundary,
+with maximum ranges of 5.0 m for obstacles and 5.5 m for raytracing.
+`x2_self_filter.urdf` preserves the X2 kinematic tree and
 visual meshes, but replaces every production collision mesh with a local
 bounding box. The boxes follow the same live link frames as the shared state
 publisher and avoid the expensive convex-hull construction that the filter
@@ -394,15 +398,15 @@ it has no infinity returns to clear empty sectors out to maximum range.
 
 `pointcloud_to_laserscan` is a standard ROS 2 package used only to make a
 lightweight map-alignment view for `x2_operator_panel`; Nav2 continues to use
-`/scan_nav/self_filtered_cloud`. The converter consumes the filtered
-`/scan_nav/self_filtered_cloud` input, outputs `/scan_nav/laser` in `base_link`,
+`/scan_nav/payload_filtered_cloud`. The converter consumes the filtered
+`/scan_nav/payload_filtered_cloud` input, outputs `/scan_nav/laser` in `base_link`,
 uses one-degree rays over a full turn, and sends infinity for empty sectors.
-Its display range defaults to 0.20-12.0 m and can be changed without altering
+Its display range defaults to 0.10-12.0 m and can be changed without altering
 costmap ranges:
 
 ```bash
 ros2 launch x2_navigation navigation.launch.py \
-  laser_scan_range_min:=0.20 laser_scan_range_max:=12.0
+  laser_scan_range_min:=0.10 laser_scan_range_max:=12.0
 ```
 
 Verify the package before deployment. On a ROS 2 Humble image without it,

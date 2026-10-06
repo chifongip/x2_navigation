@@ -137,13 +137,13 @@ def generate_launch_description():
                 "laser_scan_topic",
                 default_value="/scan_nav/laser",
                 description=(
-                    "LaserScan topic derived from /scan_nav/self_filtered_cloud "
+                    "LaserScan topic derived from /scan_nav/payload_filtered_cloud "
                     "for monitoring."
                 ),
             ),
             DeclareLaunchArgument(
                 "laser_scan_range_min",
-                default_value="0.20",
+                default_value="0.10",
                 description="Minimum valid range in meters for the monitoring laser scan.",
             ),
             DeclareLaunchArgument(
