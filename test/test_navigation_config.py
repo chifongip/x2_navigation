@@ -373,6 +373,7 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     assert "docking_server" not in configuration
 
     fine_align = configuration["fine_align_server"]["ros__parameters"]
+    assert fine_align["default_docking_profile"] == "default"
     assert fine_align["standoff"] == 0.5
     assert fine_align["capture_distance"] == 1.5
     assert fine_align["capture_lateral"] == 1.5
@@ -440,7 +441,7 @@ def test_fine_alignment_uses_timestamped_robot_relative_tag_transform():
     source = (CONFIG_FILE.parents[1] / "src" / "fine_align_server.cpp").read_text(
         encoding="utf-8"
     )
-    assert "lookupTransform(base_frame_, tag_frame_, stamp)" in source
+    assert "lookupTransform(base_frame_, profile.tag_frame, stamp)" in source
     assert "fixed_frame_, tag_frame_, tf2::TimePointZero" not in source
     assert "processPendingDetection" in source
     assert "std::min(tracking_timeout_, maximum_pose_age_)" in source

@@ -14,7 +14,9 @@ from geometry_msgs.msg import TransformStamped, Twist
 from launch_ros.actions import Node
 from nav_msgs.msg import Odometry
 from nav2_msgs.msg import CollisionMonitorState
+from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from tf2_ros import TransformBroadcaster
 from x2_navigation.action import FineAlign, Undock
@@ -28,6 +30,17 @@ def generate_test_description():
         parameters=[
             package_path / "config" / "nav2_params.yaml",
             {
+                "docking_profile_names": ["offset", "other_tag"],
+                "docking_profiles.offset.tag_id": 9,
+                "docking_profiles.offset.tag_frame": "tag9",
+                "docking_profiles.offset.standoff": 0.7,
+                "docking_profiles.offset.lateral_offset": 0.1,
+                "docking_profiles.offset.yaw_offset": 0.1,
+                "docking_profiles.other_tag.tag_id": 10,
+                "docking_profiles.other_tag.tag_frame": "tag10",
+                "docking_profiles.other_tag.standoff": 0.6,
+                "docking_profiles.other_tag.lateral_offset": 0.0,
+                "docking_profiles.other_tag.yaw_offset": 0.0,
                 "stable_sample_count": 1,
                 "settled_sample_count": 1,
                 "settling_duration": 0.15,
@@ -102,6 +115,10 @@ class TestFineAlignServer(unittest.TestCase):
         self.nav_active = False
         self.collision_stopped = False
         self.invalid_tag_orientation = False
+        self.tag_id = 9
+        self.tag_frame = "tag9"
+        self.detection_stamp = None
+        self.decision_margin = 50.0
         self.tag_x = 1.10
         self.tag_y = 0.20
         self.base_tf_x = 1.10
@@ -152,7 +169,7 @@ class TestFineAlignServer(unittest.TestCase):
         tag.header.stamp = stamp
         # Publish the tag through the camera/base branch, independent of odom.
         tag.header.frame_id = "base_link"
-        tag.child_frame_id = "tag9"
+        tag.child_frame_id = self.tag_frame
         tag.transform.translation.x = (
             cos(self.robot_yaw) * (self.tag_x - self.robot_x)
             + sin(self.robot_yaw) * (self.tag_y - self.robot_y)
@@ -188,10 +205,10 @@ class TestFineAlignServer(unittest.TestCase):
         self.transforms.sendTransform([tag, base] if self.publish_tags else [base])
 
         detection = AprilTagDetection()
-        detection.id = 9
-        detection.decision_margin = 50.0
+        detection.id = self.tag_id
+        detection.decision_margin = self.decision_margin
         message = AprilTagDetectionArray()
-        message.header.stamp = stamp
+        message.header.stamp = self.detection_stamp or stamp
         message.detections = [detection]
         if self.publish_tags:
             self.detections.publish(message)
@@ -251,6 +268,155 @@ class TestFineAlignServer(unittest.TestCase):
             self.publish_inputs()
             rclpy.spin_once(self.node, timeout_sec=0.05)
 
+    def submit_profile(self, profile="", execute=False, undock=False, inputs=True):
+        goal = Undock.Goal() if undock else FineAlign.Goal()
+        goal.profile_id = profile
+        if not undock:
+            goal.execute = execute
+        feedback = []
+        client = self.undock_client if undock else self.client
+        spin = self.spin_with_inputs_until if inputs else self.spin_until
+        sent = client.send_goal_async(
+            goal, feedback_callback=lambda message: feedback.append(message.feedback)
+        )
+        self.assertTrue(spin(sent.done))
+        self.assertTrue(sent.result().accepted)
+        result = sent.result().get_result_async()
+        self.assertTrue(spin(result.done, timeout=8.0))
+        return result.result().result, feedback
+
+    def test_a_undock_uses_default_before_any_successful_dock(self):
+        self.simulate_motion = True
+        # Action discovery can complete before the first transient state sample
+        # reaches the server. Publish state before testing initial Undock.
+        self.warm_up_inputs()
+        result, feedback = self.submit_profile(undock=True)
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.profile_id, "default")
+        self.assertTrue(all(item.profile_id == "default" for item in feedback))
+
+    def test_named_profiles_change_geometry_and_tag_selection(self):
+        self.warm_up_inputs(duration=0.2)
+        default, _ = self.submit_profile()
+        offset, feedback = self.submit_profile("offset")
+        self.assertTrue(default.success, default.message)
+        self.assertTrue(offset.success, offset.message)
+        self.assertEqual(default.profile_id, "default")
+        self.assertEqual(offset.profile_id, "offset")
+        self.assertAlmostEqual(default.final_error.x - offset.final_error.x, 0.2, places=5)
+        self.assertAlmostEqual(offset.final_error.y - default.final_error.y, -0.1, places=5)
+        self.assertAlmostEqual(offset.final_error.theta - default.final_error.theta, 0.1, places=5)
+        self.assertTrue(feedback)
+        self.assertTrue(all(item.profile_id == "offset" for item in feedback))
+        wrong_tag, _ = self.submit_profile("other_tag")
+        self.assertEqual(wrong_tag.error_code, FineAlign.Result.NO_STABLE_TAG)
+        # Matching detection without matching timestamped TF must not use tag9.
+        self.tag_id = 10
+        missing_tf, _ = self.submit_profile("other_tag")
+        self.assertEqual(missing_tf.error_code, FineAlign.Result.NO_STABLE_TAG)
+        self.tag_frame = "tag10"
+        other, _ = self.submit_profile("other_tag")
+        self.assertTrue(other.success, other.message)
+        self.assertEqual(other.profile_id, "other_tag")
+        self.assertAlmostEqual(other.final_error.x, self.tag_x - 0.6, places=5)
+        self.assertFalse(any(command != Twist() for command in self.commands))
+
+    def test_profile_activation_requires_fresh_observations(self):
+        self.warm_up_inputs(duration=0.2)
+        self.detection_stamp = self.node.get_clock().now().to_msg()
+        time.sleep(0.05)
+        stale, _ = self.submit_profile("offset")
+        self.assertEqual(stale.error_code, FineAlign.Result.NO_STABLE_TAG)
+        self.detection_stamp = None
+        fresh, _ = self.submit_profile("offset")
+        self.assertTrue(fresh.success, fresh.message)
+        # Even the same profile cannot reuse the last operation's cached target.
+        cached, _ = self.submit_profile("offset", inputs=False)
+        self.assertEqual(cached.error_code, FineAlign.Result.NO_STABLE_TAG)
+        self.assertFalse(any(command != Twist() for command in self.commands))
+
+    def test_profile_parameters_are_read_only(self):
+        client = self.node.create_client(SetParameters, "/fine_align_server/set_parameters")
+        try:
+            self.assertTrue(client.wait_for_service(timeout_sec=3.0))
+            request = SetParameters.Request()
+            request.parameters = [
+                Parameter("standoff", value=0.9).to_parameter_msg(),
+                Parameter("docking_profiles.offset.standoff", value=0.9).to_parameter_msg(),
+                Parameter("default_docking_profile", value="offset").to_parameter_msg(),
+                Parameter("docking_profile_names", value=["other_tag"]).to_parameter_msg(),
+            ]
+            future = client.call_async(request)
+            self.assertTrue(self.spin_until(future.done))
+            self.assertEqual(len(future.result().results), len(request.parameters))
+            self.assertTrue(all(not result.successful for result in future.result().results))
+            result, _ = self.submit_profile("offset")
+            self.assertTrue(result.success, result.message)
+            self.assertAlmostEqual(result.final_error.x, self.tag_x - 0.7, places=5)
+        finally:
+            self.node.destroy_client(client)
+
+    def test_unknown_profiles_abort_without_motion(self):
+        for undock in (False, True):
+            result, _ = self.submit_profile("missing", undock=undock)
+            expected = Undock.Result.INVALID_PROFILE if undock else FineAlign.Result.INVALID_PROFILE
+            self.assertEqual(result.error_code, expected)
+            self.assertFalse(result.success)
+            self.assertEqual(result.profile_id, "")
+        self.assertFalse(any(command != Twist() for command in self.commands))
+
+    def test_profile_execution_and_remembered_undocking(self):
+        self.tag_x = 0.85
+        self.tag_y = 0.1
+        self.simulate_motion = True
+        dock, _ = self.submit_profile("offset", execute=True)
+        self.assertTrue(dock.success, dock.message)
+        self.assertLessEqual(abs(self.tag_x - 0.7), 0.085)
+        self.assertLessEqual(abs(self.tag_y - 0.1), 0.085)
+        measured, _ = self.submit_profile("default")
+        self.assertTrue(measured.success, measured.message)
+        failed, _ = self.submit_profile("missing", execute=True)
+        self.assertEqual(failed.error_code, FineAlign.Result.INVALID_PROFILE)
+        # A valid profile failing capture validation must also leave history intact.
+        saved_x = self.tag_x
+        self.tag_x = 3.0
+        failed_capture, _ = self.submit_profile("default", execute=True)
+        self.assertEqual(failed_capture.error_code, FineAlign.Result.OUTSIDE_CAPTURE_ENVELOPE)
+        self.tag_x = saved_x
+        self.simulate_motion = False
+        self.commands.clear()
+        cancel_goal = FineAlign.Goal()
+        cancel_goal.profile_id = "default"
+        cancel_goal.execute = True
+        sent = self.client.send_goal_async(cancel_goal)
+        self.assertTrue(self.spin_with_inputs_until(sent.done))
+        handle = sent.result()
+        self.assertTrue(handle.accepted)
+        self.assertTrue(self.spin_with_inputs_until(
+            lambda: any(command.linear.x > 0.0 for command in self.commands)
+        ))
+        canceled = handle.cancel_goal_async()
+        self.assertTrue(self.spin_with_inputs_until(canceled.done))
+        canceled_result = handle.get_result_async()
+        self.assertTrue(self.spin_with_inputs_until(canceled_result.done))
+        self.assertEqual(canceled_result.result().status, GoalStatus.STATUS_CANCELED)
+        self.simulate_motion = True
+        retreat, feedback = self.submit_profile(undock=True)
+        self.assertTrue(retreat.success, retreat.message)
+        self.assertEqual(retreat.profile_id, "offset")
+        self.assertTrue(all(item.profile_id == "offset" for item in feedback))
+        explicit, _ = self.submit_profile("default", undock=True)
+        self.assertTrue(explicit.success, explicit.message)
+        remembered, _ = self.submit_profile(undock=True)
+        self.assertEqual(remembered.profile_id, "offset")
+        self.assertTrue(remembered.success, remembered.message)
+        # Restore successful-dock history for the other shared-server tests.
+        self.simulate_motion = False
+        self.tag_x = 0.5
+        self.tag_y = 0.0
+        restored, _ = self.submit_profile("default", execute=True)
+        self.assertTrue(restored.success, restored.message)
+
     def test_measurement_only_validates_without_motion(self):
         self.warm_up_inputs()
         goal = FineAlign.Goal()
@@ -285,6 +451,16 @@ class TestFineAlignServer(unittest.TestCase):
         self.assertFalse(action_result.success)
         self.assertEqual(action_result.error_code, FineAlign.Result.NO_STABLE_TAG)
         self.assertIn("no stable", action_result.message)
+
+    def test_nonfinite_detection_confidence_cannot_acquire_profile(self):
+        for margin in (float("inf"), float("nan")):
+            with self.subTest(margin=margin):
+                self.decision_margin = margin
+                result, _ = self.submit_profile("default")
+                self.assertFalse(result.success)
+                self.assertEqual(result.error_code, FineAlign.Result.NO_STABLE_TAG)
+                self.assertFalse(any(command.linear.x or command.linear.y or command.angular.z
+                                     for command in self.commands))
 
     def test_invalid_tag_aborts_without_crashing_and_recovers(self):
         self.warm_up_inputs()

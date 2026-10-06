@@ -63,8 +63,7 @@ Only one process may bind port 8558. Do not use the X2 upper-body command port
 
 Fine alignment is a separate operation after coarse `NavigateToPose` completes.
 The public `/fine_align` (`x2_navigation/action/FineAlign`) action defaults to
-measurement only (`execute: false`). It requires Nav2 to be idle, a stable tag9
-pose, and `/manipulation_state` to report `EMPTY` or `HOLDING`. Execution uses a
+measurement only (`execute: false`). It requires Nav2 to be idle, a stable pose for the selected tag, and `/manipulation_state` to report `EMPTY` or `HOLDING`. Execution uses a
 local holonomic controller that independently corrects forward, lateral, and yaw
 error while all output continues through Collision Monitor and the ZMQ deadman.
 
@@ -85,9 +84,76 @@ ros2 action send_goal /fine_align x2_navigation/action/FineAlign \
   "{execute: true}" --feedback
 ```
 
-Undocking is a separate fixed-profile operation exposed as `/undock`
+### Named docking configurations
+
+Both action goals accept an optional `profile_id`; feedback and results report
+its resolved name. Empty `/fine_align` selection uses `default_docking_profile`
+(default: `default`). The reserved `default` profile uses the existing top-level
+`tag_id`, `tag_frame`, `standoff`, `lateral_offset`, and `yaw_offset` parameters,
+including the currently configured tag9 and 0.50 m stand-off.
+
+Additional profiles are startup ROS parameters. For example, merge the following
+into `fine_align_server.ros__parameters` in your navigation parameter file:
+
+```yaml
+# Illustrative values only; commission offsets before physical execution.
+docking_profile_names: [table_side, other_station]
+default_docking_profile: default
+docking_profiles:
+  table_side:
+    tag_id: 9
+    tag_frame: tag9
+    standoff: 0.70
+    lateral_offset: 0.10
+    yaw_offset: 0.10
+  other_station:
+    tag_id: 10
+    tag_frame: tag10
+    standoff: 0.60
+    lateral_offset: 0.0
+    yaw_offset: 0.0
+```
+
+Each additional profile requires all five fields. Names contain only letters,
+numbers, or underscores, must be unique, and cannot reuse `default`. Tag IDs
+must be nonnegative, frames nonempty, stand-off positive and finite, and offsets
+finite. The configured default must exist. Profile parameters are read-only;
+restart the server after editing them. Omit `docking_profile_names` when no
+additional profiles are needed.
+
+Stand-off is measured along the tag's projected outward `+Z` normal; lateral
+offset follows its projected `+X` axis, **not robot left**. Yaw offset is added
+to the heading facing the tag. Distances use meters and angles use radians.
+Profiles share capture limits, speeds, tolerances, tracking settings, retries,
+and retreat distance. They select final poses, not staged approach maneuvers.
+Each operation discards cached tracking and requires fresh observations;
+retries keep the selected profile. The detector must publish that tag ID and
+its matching timestamped TF frame; profiles do not configure the detector.
+
+```bash
+# Validate a named profile without motion.
+ros2 action send_goal /fine_align x2_navigation/action/FineAlign \
+  "{profile_id: table_side, execute: false}" --feedback
+
+# Explicitly select the tag profile for retreat (physical motion).
+ros2 action send_goal /undock x2_navigation/action/Undock \
+  "{profile_id: table_side}" --feedback
+```
+
+An empty `/undock` request uses the last successfully executed docking profile,
+falling back to the configured default after restart or before the first
+successful dock. Measurement-only docking, failed/canceled docking, and
+undocking do not change this history. Explicit undocking selection overrides
+history for that operation only. Unknown profiles abort without motion using
+`INVALID_PROFILE` (FineAlign code 10; Undock code 9), without silent fallback.
+
+These action interface additions require rebuilding and restarting action
+clients together with the server. The operator panel continues sending empty
+profile selections and needs no UI changes.
+
+Undocking is a separate operation with shared retreat settings exposed as `/undock`
 (`x2_navigation/action/Undock`). Both docking and undocking now require the same
-visible table tag and have no odometry subscription or measured-velocity gate.
+visible selected tag and have no odometry subscription or measured-velocity gate.
 Undocking first acquires a fresh stable relative target, then defines a robot pose
 `undock_distance` behind the initial robot pose, preserving the initial heading.
 It computes the current error through the full planar relative transform:

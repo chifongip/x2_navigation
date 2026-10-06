@@ -1,4 +1,5 @@
 #include "x2_navigation/docking_tracking.hpp"
+#include "x2_navigation/docking_profiles.hpp"
 #include "x2_navigation/navigation_command_gate.hpp"
 #include "x2_navigation/table_dock_geometry.hpp"
 
@@ -11,9 +12,11 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <Eigen/Geometry>
 #include <action_msgs/msg/goal_status.hpp>
@@ -23,6 +26,7 @@
 #include <geometry_msgs/msg/pose2_d.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav2_msgs/msg/collision_monitor_state.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <tf2/exceptions.h>
@@ -49,12 +53,45 @@ public:
   : Node("fine_align_server"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
   {
     base_frame_ = declare_parameter("base_frame", "base_link");
-    tag_frame_ = declare_parameter("tag_frame", "tag9");
-    tag_id_ = declare_parameter("tag_id", 9);
+    rcl_interfaces::msg::ParameterDescriptor profile_descriptor;
+    profile_descriptor.read_only = true;
+    const auto tag_frame = declare_parameter("tag_frame", "tag9", profile_descriptor);
+    const auto tag_id = declare_parameter("tag_id", 9, profile_descriptor);
     minimum_decision_margin_ = declare_parameter("minimum_decision_margin", 20.0);
-    standoff_ = declare_parameter("standoff", 0.70);
-    lateral_offset_ = declare_parameter("lateral_offset", 0.0);
-    yaw_offset_ = declare_parameter("yaw_offset", 0.0);
+    const auto standoff = declare_parameter("standoff", 0.70, profile_descriptor);
+    const auto lateral_offset = declare_parameter("lateral_offset", 0.0, profile_descriptor);
+    const auto yaw_offset = declare_parameter("yaw_offset", 0.0, profile_descriptor);
+    profiles_.add({"default", tag_id, tag_frame, standoff, lateral_offset, yaw_offset});
+    const auto profile_names = declare_parameter<std::vector<std::string>>(
+      "docking_profile_names", std::vector<std::string>{}, profile_descriptor);
+    std::set<std::string> profile_names_seen{"default"};
+    for (const auto & name : profile_names) {
+      if (!profile_names_seen.insert(name).second) {
+        throw std::invalid_argument("duplicate docking profile: " + name);
+      }
+      if (name.empty() || name.find_first_not_of(
+          "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos)
+      {
+        throw std::invalid_argument("invalid docking profile name: " + name);
+      }
+      const auto prefix = "docking_profiles." + name + ".";
+      const auto required = [this, &prefix, &profile_descriptor](
+        const std::string & field, rclcpp::ParameterType type) {
+          const auto value = declare_parameter(prefix + field, type, profile_descriptor);
+          if (value.get_type() == rclcpp::ParameterType::PARAMETER_NOT_SET) {
+            throw std::invalid_argument("missing docking profile parameter: " + prefix + field);
+          }
+          return value;
+        };
+      profiles_.add({
+        name, required("tag_id", rclcpp::ParameterType::PARAMETER_INTEGER).get<std::int64_t>(),
+        required("tag_frame", rclcpp::ParameterType::PARAMETER_STRING).get<std::string>(),
+        required("standoff", rclcpp::ParameterType::PARAMETER_DOUBLE).get<double>(),
+        required("lateral_offset", rclcpp::ParameterType::PARAMETER_DOUBLE).get<double>(),
+        required("yaw_offset", rclcpp::ParameterType::PARAMETER_DOUBLE).get<double>()});
+    }
+    default_profile_ = declare_parameter("default_docking_profile", "default", profile_descriptor);
+    active_profile_ = profiles_.resolve("", default_profile_);
     maximum_pose_age_ = declare_parameter("maximum_pose_age", 2.5);
     declare_parameter("maximum_sample_gap", 2.5);  // Legacy parameter; tracking_timeout replaces it.
     const auto stable_sample_count = declare_parameter("stable_sample_count", 3);
@@ -156,7 +193,7 @@ public:
       "Docking uses timestamped %s <- %s; tracking_timeout=%.3f s; settling_duration=%.3f s; "
       "translation=(min=%.3f, max=%.3f m/s); angular=(min=%.3f, max=%.3f rad/s). "
       "settled_sample_count is retained for compatibility; completion uses settling_duration.",
-      base_frame_.c_str(), tag_frame_.c_str(), tracking_timeout_, settling_duration_,
+      base_frame_.c_str(), active_profile_.tag_frame.c_str(), tracking_timeout_, settling_duration_,
       controller_config_.translation_speed_min, controller_config_.translation_speed_max,
       controller_config_.angular_speed_min, controller_config_.angular_speed_max);
     controller_period_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -260,8 +297,53 @@ private:
     std::string message;
   };
 
+  bool activateProfile(const std::string & requested, bool undocking, std::string & resolved)
+  {
+    std::scoped_lock lock(measurement_mutex_, pending_detection_mutex_);
+    try {
+      active_profile_ = profiles_.resolve(
+        requested, default_profile_, undocking ? last_docked_profile_ : "");
+    } catch (const std::invalid_argument &) {
+      return false;
+    }
+    resolved = active_profile_.name;
+    ++profile_generation_;
+    activation_stamp_ = now();
+    pending_detection_.reset();
+    tracker_->reset();
+    stable_target_.reset();
+    raw_error_ = PlanarError{};
+    last_sample_stamp_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    stable_target_stamp_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    RCLCPP_INFO(
+      get_logger(), "Docking acquisition: profile=%s; tag_id=%lld; tag_frame=%s; "
+      "standoff=%.3f m; lateral_offset=%.3f m; yaw_offset=%.3f rad",
+      resolved.c_str(), static_cast<long long>(active_profile_.tag_id),
+      active_profile_.tag_frame.c_str(), active_profile_.standoff,
+      active_profile_.lateral_offset, active_profile_.yaw_offset);
+    return true;
+  }
+
+  void logProfileContext(const char * event)
+  {
+    std::lock_guard<std::mutex> lock(measurement_mutex_);
+    RCLCPP_INFO(
+      get_logger(), "%s profile=%s; tag_id=%lld; tag_frame=%s", event,
+      active_profile_.name.c_str(), static_cast<long long>(active_profile_.tag_id),
+      active_profile_.tag_frame.c_str());
+  }
+
   void processPendingDetection()
   {
+    DockingProfile profile;
+    std::uint64_t generation;
+    rclcpp::Time activation_stamp(0, 0, RCL_ROS_TIME);
+    {
+      std::lock_guard<std::mutex> lock(measurement_mutex_);
+      profile = active_profile_;
+      generation = profile_generation_;
+      activation_stamp = activation_stamp_;
+    }
     apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message;
     {
       std::lock_guard<std::mutex> lock(pending_detection_mutex_);
@@ -271,11 +353,14 @@ private:
       return;
     }
     const auto found = std::find_if(
-      message->detections.begin(), message->detections.end(), [this](const auto & item) {
-        return item.id == tag_id_ && item.decision_margin >= minimum_decision_margin_;
+      message->detections.begin(), message->detections.end(), [this, &profile](const auto & item) {
+        return item.id == profile.tag_id && std::isfinite(item.decision_margin) &&
+               item.decision_margin >= minimum_decision_margin_;
       });
     const rclcpp::Time stamp(message->header.stamp);
-    if (found == message->detections.end() || stamp.nanoseconds() == 0) {
+    if (found == message->detections.end() || stamp.nanoseconds() == 0 ||
+      stamp < activation_stamp)
+    {
       return;
     }
     const double age = (now() - stamp).seconds();
@@ -284,15 +369,17 @@ private:
     }
     {
       std::lock_guard<std::mutex> lock(measurement_mutex_);
-      if (last_sample_stamp_.nanoseconds() != 0 && stamp <= last_sample_stamp_) {
+      if (generation != profile_generation_ ||
+        (last_sample_stamp_.nanoseconds() != 0 && stamp <= last_sample_stamp_))
+      {
         return;
       }
     }
     try {
       // Retry queued detections on the timer if their matching TF has not arrived yet.
-      const auto transform = tf_buffer_.lookupTransform(base_frame_, tag_frame_, stamp);
+      const auto transform = tf_buffer_.lookupTransform(base_frame_, profile.tag_frame, stamp);
       const auto target = tableDockPose(
-        tf2::transformToEigen(transform), standoff_, lateral_offset_, yaw_offset_);
+        tf2::transformToEigen(transform), profile.standoff, profile.lateral_offset, profile.yaw_offset);
       const auto raw = planarError(Eigen::Isometry3d::Identity(), target);
       geometry_msgs::msg::Twist command;
       {
@@ -308,6 +395,11 @@ private:
         }
       }
       std::lock_guard<std::mutex> lock(measurement_mutex_);
+      if (generation != profile_generation_ ||
+        (last_sample_stamp_.nanoseconds() != 0 && stamp <= last_sample_stamp_))
+      {
+        return;
+      }
       last_sample_stamp_ = stamp;
       if (!tracker_->observe(raw, stamp.seconds(), command)) {
         RCLCPP_WARN_THROTTLE(
@@ -331,6 +423,9 @@ private:
     } catch (const std::exception & error) {
       {
         std::lock_guard<std::mutex> lock(measurement_mutex_);
+        if (generation != profile_generation_) {
+          return;
+        }
         tracker_->reset();
         stable_target_.reset();
         last_sample_stamp_ = stamp;
@@ -386,6 +481,8 @@ private:
         return true;
       }
       auto feedback = std::make_shared<FineAlign::Feedback>();
+      feedback->profile_id = handle->get_goal()->profile_id.empty() ?
+        default_profile_ : handle->get_goal()->profile_id;
       feedback->stage = feedback_stage;
       feedback->tag_visible = target_available;
       handle->publish_feedback(feedback);
@@ -435,6 +532,7 @@ private:
     const std::shared_ptr<GoalHandle> & handle, const FineAlign::Result & result)
   {
     auto feedback = std::make_shared<FineAlign::Feedback>();
+    feedback->profile_id = result.profile_id;
     feedback->stage = FineAlign::Feedback::REACQUIRING;
     feedback->current_error = result.final_error;
     feedback->tag_visible = false;
@@ -575,6 +673,7 @@ private:
 
       const auto current_steady_time = std::chrono::steady_clock::now();
       if (current_steady_time >= next_progress_log) {
+        logProfileContext("Fine-align progress:");
         RCLCPP_INFO(
           get_logger(),
           "Fine-align progress: attempt=%zu/%zu; sequence=%llu; "
@@ -594,6 +693,7 @@ private:
       }
 
       auto feedback = std::make_shared<FineAlign::Feedback>();
+      feedback->profile_id = result->profile_id;
       feedback->stage = settling_pose ?
         FineAlign::Feedback::SETTLING : FineAlign::Feedback::CONTROLLING;
       feedback->current_error = errorMessage(error);
@@ -618,6 +718,11 @@ private:
     result->final_error.theta = std::numeric_limits<double>::quiet_NaN();
     result->manipulation_state =
       agibot_x2_manipulation_msgs::msg::ManipulationState::UNKNOWN;
+    if (!activateProfile(handle->get_goal()->profile_id, false, result->profile_id)) {
+      finish(handle, result, FineAlign::Result::INVALID_PROFILE,
+        "unknown docking profile: " + handle->get_goal()->profile_id);
+      return;
+    }
     if (nav_active_.load()) {
       finish(handle, result, FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 is active");
       return;
@@ -645,9 +750,13 @@ private:
         result->success = true;
         result->error_code = FineAlign::Result::SUCCESS;
         result->message = handle->get_goal()->execute ?
-          "table fine alignment succeeded on attempt " + std::to_string(attempt) + " of " +
+          "tag fine alignment succeeded on attempt " + std::to_string(attempt) + " of " +
           std::to_string(maximum_attempts) :
           "fine-alignment inputs and capture pose are ready";
+        if (handle->get_goal()->execute) {
+          std::lock_guard<std::mutex> lock(measurement_mutex_);
+          last_docked_profile_ = result->profile_id;
+        }
         handle->succeed(result);
         operation_active_.store(false);
         return;
@@ -669,6 +778,7 @@ private:
       }
 
       minimum_sequence = latestStableTargetSequence();
+      logProfileContext("Fine-align retry:");
       RCLCPP_WARN(
         get_logger(),
         "Fine-align retry: attempt=%zu/%zu failed; code=%u; reason='%s'; "
@@ -724,6 +834,7 @@ private:
       result->message = "undocking canceled";
       handle->canceled(result);
     } else {
+      logProfileContext("Undock action abort:");
       logUndockAbort(*result, code, message);
       handle->abort(result);
     }
@@ -735,7 +846,13 @@ private:
     auto result = std::make_shared<Undock::Result>();
     result->manipulation_state = currentManipulationState();
 
+    if (!activateProfile(handle->get_goal()->profile_id, true, result->profile_id)) {
+      finishUndock(handle, result, Undock::Result::INVALID_PROFILE,
+        "unknown docking profile: " + handle->get_goal()->profile_id);
+      return;
+    }
     auto validating = std::make_shared<Undock::Feedback>();
+    validating->profile_id = result->profile_id;
     validating->stage = Undock::Feedback::VALIDATING;
     validating->distance_remaining = undock_distance_;
     handle->publish_feedback(validating);
@@ -844,6 +961,7 @@ private:
       }
       const double remaining = std::max(0.0, undock_distance_ - result->distance_traveled);
       if (control_time >= next_progress_log) {
+        logProfileContext("Undock progress:");
         RCLCPP_INFO(get_logger(),
           "Undock progress: distance=(traveled=%.3f m, remaining=%.3f m, target=%.3f m); "
           "error_base=(x=%.3f m, y=%.3f m, yaw=%.3f rad); "
@@ -859,6 +977,7 @@ private:
           std::chrono::duration<double>(progress_log_interval_));
       }
       auto feedback = std::make_shared<Undock::Feedback>();
+      feedback->profile_id = result->profile_id;
       feedback->stage = settling_pose ? Undock::Feedback::SETTLING : Undock::Feedback::MOVING;
       feedback->distance_traveled = result->distance_traveled;
       feedback->distance_remaining = remaining;
@@ -961,6 +1080,7 @@ private:
     result->success = false;
     result->error_code = code;
     result->message = message;
+    logProfileContext("Fine-align action abort:");
     logAbortDiagnostic(handle, *result, code, message);
     stopAlignment();
     handle->abort(result);
@@ -1042,12 +1162,15 @@ private:
   std::optional<std::chrono::steady_clock::time_point> collision_stop_since_;
   std::atomic_bool operation_active_{false}, alignment_active_{false}, nav_active_{false};
   bool collision_stopped_{false};
-  std::string base_frame_, tag_frame_;
-  int tag_id_{9};
+  std::string base_frame_, default_profile_, last_docked_profile_;
+  DockingProfiles profiles_;
+  DockingProfile active_profile_;
+  std::uint64_t profile_generation_{0};
+  rclcpp::Time activation_stamp_{0, 0, RCL_ROS_TIME};
   std::size_t stable_sample_count_{3}, maximum_retries_{2};
   HolonomicFineAlignConfig controller_config_, undock_controller_config_;
   std::chrono::nanoseconds controller_period_{50ms};
-  double minimum_decision_margin_, standoff_, lateral_offset_, yaw_offset_;
+  double minimum_decision_margin_;
   double maximum_pose_age_, maximum_position_spread_, maximum_angular_spread_;
   double capture_distance_, capture_lateral_, capture_yaw_, reverse_capture_distance_;
   double acquisition_timeout_, approach_timeout_, retry_delay_, command_timeout_;

@@ -140,6 +140,9 @@ fine_align_server:
     fixed_frame: odom
     base_frame: base_link
     odom_topic: /odom
+    # Additional named profiles use docking_profiles.<name> fields.
+    # The default profile retains the legacy tag and geometry settings below.
+    default_docking_profile: default
     tag_frame: tag9
     tag_id: 9
     detections_topic: /front_center_rectify/detections

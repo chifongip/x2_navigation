@@ -1,4 +1,5 @@
-# Uses the fixed retreat profile configured on the server.
+# Empty selection uses the last successful dock, or the default after restart.
+string profile_id
 ---
 uint16 SUCCESS=0
 uint16 BUSY=1
@@ -9,11 +10,13 @@ uint16 COLLISION_STOPPED=5
 uint16 UNDOCK_TIMEOUT=6
 uint16 SAFETY_ABORT=7
 uint16 CANCELED=8
+uint16 INVALID_PROFILE=9
 bool success
 uint16 error_code
 string message
 float64 distance_traveled
 uint8 manipulation_state
+string profile_id
 ---
 uint16 VALIDATING=0
 uint16 MOVING=1
@@ -25,3 +28,4 @@ float64 commanded_speed
 float64 commanded_lateral_speed
 float64 commanded_yaw_speed
 float32 progress
+string profile_id

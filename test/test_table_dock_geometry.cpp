@@ -26,3 +26,18 @@ TEST(TableDockGeometry, ReportsTargetInBaseFrame)
   EXPECT_NEAR(error.y, -0.1, 1e-9);
   EXPECT_NEAR(error.yaw, 0.0, 1e-9);
 }
+
+TEST(TableDockGeometry, AppliesOffsetsInRotatedTagAxes)
+{
+  Eigen::Isometry3d tag = Eigen::Isometry3d::Identity();
+  tag.translation() = Eigen::Vector3d(1.0, 2.0, 0.8);
+  tag.linear().col(2) = Eigen::Vector3d::UnitY();
+  tag.linear().col(0) = Eigen::Vector3d::UnitX();
+  tag.linear().col(1) = -Eigen::Vector3d::UnitZ();
+  const auto target = x2_navigation::tableDockPose(tag, 0.6, -0.2, 0.3);
+  EXPECT_NEAR(target.translation().x(), 0.8, 1e-9);
+  EXPECT_NEAR(target.translation().y(), 2.6, 1e-9);
+  EXPECT_NEAR(target.translation().z(), 0.0, 1e-9);
+  const auto error = x2_navigation::planarError(Eigen::Isometry3d::Identity(), target);
+  EXPECT_NEAR(error.yaw, -M_PI / 2.0 + 0.3, 1e-9);
+}

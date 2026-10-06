@@ -10,6 +10,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
@@ -83,7 +84,7 @@ target_include_directories(fine_align_server PRIVATE include)
 target_link_libraries(fine_align_server Eigen3::Eigen)
 ament_target_dependencies(fine_align_server
   action_msgs agibot_x2_manipulation_msgs apriltag_msgs geometry_msgs
-  nav2_msgs rclcpp rclcpp_action tf2 tf2_eigen tf2_geometry_msgs tf2_ros
+  nav2_msgs rcl_interfaces rclcpp rclcpp_action tf2 tf2_eigen tf2_geometry_msgs tf2_ros
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(fine_align_server "${cpp_typesupport_target}")
@@ -140,6 +141,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_holonomic_fine_align Eigen3::Eigen)
   ament_target_dependencies(test_holonomic_fine_align geometry_msgs)
 
+  ament_add_gtest(test_docking_profiles test/test_docking_profiles.cpp)
+  target_compile_options(test_docking_profiles PRIVATE -Wall -Wextra -Wpedantic)
+  target_include_directories(test_docking_profiles PRIVATE include)
+
   ament_add_gtest(test_table_dock_geometry test/test_table_dock_geometry.cpp)
   target_compile_options(test_table_dock_geometry PRIVATE -Wall -Wextra -Wpedantic)
   target_include_directories(test_table_dock_geometry PRIVATE include)
@@ -162,8 +167,9 @@ if(BUILD_TESTING)
     tf2_geometry_msgs
   )
 
+  ament_add_pytest_test(test_docking_profile_configuration test/test_docking_profile_configuration.py)
   ament_add_pytest_test(test_navigation_config test/test_navigation_config.py)
-  add_launch_test(test/test_fine_align_server.launch.py TIMEOUT 60)
+  add_launch_test(test/test_fine_align_server.launch.py TIMEOUT 120)
   add_launch_test(test/test_fast_lio_odom_adapter.launch.py TIMEOUT 30)
   add_launch_test(test/test_navigation.launch.py TIMEOUT 30)
   add_launch_test(test/test_velocity_smoother.launch.py TIMEOUT 60)

@@ -1,4 +1,6 @@
+# Empty selection uses default_docking_profile. execute defaults to false.
 bool execute
+string profile_id
 ---
 uint16 SUCCESS=0
 uint16 BUSY=1
@@ -10,11 +12,13 @@ uint16 DOCKING_FAILED=6
 uint16 COLLISION_STOPPED=7
 uint16 ALIGNMENT_TIMEOUT=8
 uint16 SAFETY_ABORT=9
+uint16 INVALID_PROFILE=10
 bool success
 uint16 error_code
 string message
 geometry_msgs/Pose2D final_error
 uint8 manipulation_state
+string profile_id
 ---
 uint16 VALIDATING=0
 uint16 ACQUIRING=1
@@ -25,3 +29,4 @@ uint16 stage
 geometry_msgs/Pose2D current_error
 bool tag_visible
 float32 progress
+string profile_id
