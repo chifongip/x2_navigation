@@ -143,8 +143,26 @@ fine_align_server:
     # Additional named profiles use docking_profiles.<name> fields.
     # The default profile retains the legacy tag and geometry settings below.
     default_docking_profile: default
-    docking_profile_names: [trolley]
+    docking_profile_names: [trolley, small_carton_dock, grey_box_dock]
     docking_profiles:
+      small_carton_dock:
+        target_source: box
+        detections_topic: /detections
+        standoff: 0.5
+        lateral_offset: 0.0
+        yaw_offset: 0.0
+        undock_mode: timed_reverse
+        timed_reverse_speed: 0.1  # m/s; reverse along base X
+        timed_reverse_duration: 3.0  # s; nominal 0.30 m, not measured
+      grey_box_dock:
+        target_source: box
+        detections_topic: /detections
+        standoff: 0.5
+        lateral_offset: 0.0
+        yaw_offset: 0.0
+        undock_mode: timed_reverse
+        timed_reverse_speed: 0.1  # m/s; reverse along base X
+        timed_reverse_duration: 3.0  # s; nominal 0.30 m, not measured
       trolley:
         tag_id: 7
         tag_frame: tag7

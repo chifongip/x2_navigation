@@ -373,7 +373,7 @@ def test_named_dock_configuration():
     configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
     fine_align = configuration["fine_align_server"]["ros__parameters"]
 
-    assert fine_align["docking_profile_names"] == ["trolley"]
+    assert fine_align["docking_profile_names"] == ["trolley", "small_carton_dock", "grey_box_dock"]
     assert fine_align["docking_profiles"]["trolley"] == {
         "tag_id": 7,
         "tag_frame": "tag7",
@@ -580,3 +580,15 @@ def test_rviz_uses_transient_local_qos_for_the_packaged_map():
     assert cloud_display["Class"] == "rviz_default_plugins/PointCloud2"
     assert cloud_display["Topic"]["Value"] == "/scan_nav/self_filtered_cloud"
     assert cloud_display["Topic"]["Reliability Policy"] == "Best Effort"
+
+
+def test_box_tag_dock_uses_pickup_camera_and_timed_undock():
+    params = yaml.safe_load(CONFIG_FILE.read_text())["fine_align_server"]["ros__parameters"]
+    box = params["docking_profiles"]["grey_box_dock"]
+    assert box["target_source"] == "box"
+    assert "tag_id" not in box and "tag_frame" not in box
+    assert box["detections_topic"] == "/detections"
+    assert box["standoff"] == 0.5
+    assert box["undock_mode"] == "timed_reverse"
+    assert box["timed_reverse_speed"] == 0.1
+    assert box["timed_reverse_duration"] == 3.0

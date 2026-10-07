@@ -1,6 +1,9 @@
-# Empty selection uses default_docking_profile. execute defaults to false.
+# Empty selection uses the selected box's default, or default_docking_profile
+# without an instance_id. execute defaults to false.
 bool execute
 string profile_id
+# Required for a box target profile; use the selected BoxState instance_id.
+string instance_id
 ---
 uint16 SUCCESS=0
 uint16 BUSY=1
@@ -19,6 +22,7 @@ string message
 geometry_msgs/Pose2D final_error
 uint8 manipulation_state
 string profile_id
+string instance_id
 ---
 uint16 VALIDATING=0
 uint16 ACQUIRING=1
@@ -30,3 +34,4 @@ geometry_msgs/Pose2D current_error
 bool tag_visible
 float32 progress
 string profile_id
+string instance_id

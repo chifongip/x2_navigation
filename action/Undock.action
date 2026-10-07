@@ -17,6 +17,10 @@ string message
 float64 distance_traveled
 uint8 manipulation_state
 string profile_id
+# Resolved profile mode. Timed distances are command-based estimates.
+string undock_mode
+float64 elapsed_time
+string instance_id
 ---
 uint16 VALIDATING=0
 uint16 MOVING=1
@@ -29,3 +33,6 @@ float64 commanded_lateral_speed
 float64 commanded_yaw_speed
 float32 progress
 string profile_id
+string undock_mode
+float64 elapsed_time
+string instance_id

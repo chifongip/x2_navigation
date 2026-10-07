@@ -131,7 +131,9 @@ docking_profiles:
     yaw_offset: 0.0
 ```
 
-Each additional profile requires all five fields. Names contain only letters,
+Each static-tag profile requires all five fields. Box-target profiles instead
+use `target_source: box`; they require
+stand-off/lateral/yaw settings but no fixed tag ID or frame. Names contain only letters,
 numbers, or underscores, must be unique, and cannot reuse `default`. Tag IDs
 must be nonnegative, frames nonempty, stand-off positive and finite, and offsets
 finite. The configured default must exist. Profile parameters are read-only;
@@ -141,9 +143,9 @@ additional profiles are needed.
 Stand-off is measured along the tag's projected outward `+Z` normal; lateral
 offset follows its projected `+X` axis, **not robot left**. Yaw offset is added
 to the heading facing the tag. Distances use meters and angles use radians.
-Profiles share capture limits, speeds, tolerances, tracking settings, retries,
-and retreat distance. They select final poses, not staged approach maneuvers.
-Each operation discards cached tracking and requires fresh observations;
+Profiles share capture limits, docking speeds, tolerances, tracking settings, retries,
+and tag-relative retreat distance. Detection topics and undock modes can vary by profile. They select final poses, not staged approach maneuvers.
+Each tag-based operation discards cached tracking and requires fresh observations;
 retries keep the selected profile. The detector must publish that tag ID and
 its matching timestamped TF frame; profiles do not configure the detector.
 
@@ -165,12 +167,11 @@ history for that operation only. Unknown profiles abort without motion using
 `INVALID_PROFILE` (FineAlign code 10; Undock code 9), without silent fallback.
 
 These action interface additions require rebuilding and restarting action
-clients together with the server. The operator panel continues sending empty
-profile selections and needs no UI changes.
+clients together with the server, including the operator panel.
 
 Undocking is a separate operation with shared retreat settings exposed as `/undock`
-(`x2_navigation/action/Undock`). Both docking and undocking now require the same
-visible selected tag and have no odometry subscription or measured-velocity gate.
+(`x2_navigation/action/Undock`). Docking and `tag_relative` undocking require the selected visible tag.
+Neither undock mode uses odometry or a measured-velocity gate.
 Undocking first acquires a fresh stable relative target, then defines a robot pose
 `undock_distance` behind the initial robot pose, preserving the initial heading.
 It computes the current error through the full planar relative transform:
@@ -194,8 +195,65 @@ Undocking has no automatic retry. Missing/stale/invalid tag tracking commands ze
 and aborts with `NO_STABLE_TAG` (code 4), replacing the old
 `ODOMETRY_UNAVAILABLE` name. Clients should rebuild the regenerated action
 interface. Cancellation, persistent collision stop, Nav2 activation, invalid
-manipulation state, timeout, and ROS shutdown also command zero. The tag must
-remain visible throughout retreat; there is no blind odometry or timed fallback.
+manipulation state, timeout, and ROS shutdown also command zero. In `tag_relative` mode the tag must remain visible throughout retreat;
+there is no automatic timed fallback.
+
+The supplied `small_carton_dock` and `grey_box_dock` profiles dock to the selected box instance from
+`/detections`, the pickup camera pipeline, at a 0.5 m standoff with zero lateral
+and yaw offsets. Their settings can be calibrated independently for each box type. Tag +X points right, +Y up, and +Z toward the robot. The box
+must remain stationary during docking. Validate this standoff against arm reach
+with simulation and plan-only manipulation before hardware use.
+
+For a box-target profile, `/fine_align` requires `instance_id: 'tag:<id>'`, the
+same ID used by the localizer's `BoxState` and manipulation Pick action. The
+server requires a fresh `/box_states` observation and uses its detector tag frame.
+Each box type advertises its allowed `docking_profile_ids` and
+`default_docking_profile` from the manipulation box catalog. Empty profile
+selection with an instance ID uses that box's default. An explicit approach
+must belong to that box; unsupported or unconfigured approaches fail before
+motion. Different box types may reference different profiles or share one.
+Multiple approaches may be associated with the same box type.
+Invalid or missing instance IDs abort before motion. The target is fixed for
+that action and all retries; no other visible box is substituted. Result and
+feedback report the resolved `instance_id` alongside the docking profile.
+Successful physical docking retains both for undocking. Measurement-only or
+failed docking does not replace the retained target. Explicit timed undocking
+can run after restart without a retained instance; tag-relative box undocking
+requires a prior successful dock to establish the stationary reference.
+
+Box tags must be mounted vertically with the stated axes. A top-mounted tag
+needs a new physical mount and calibrated tag-to-box transform before using
+this docking profile. The carton keeps its top-tag calibration and does not
+advertise `small_carton_dock` until that association is explicitly configured.
+
+Profiles optionally configure `detections_topic` (inherited from the global
+setting), `undock_mode` (`tag_relative` by default), `timed_reverse_speed`
+(0.1 m/s), and `timed_reverse_duration` (3.0 s). The global equivalents configure
+the default profile. Named profiles default independently to tag-relative mode.
+Timed speed must be positive and no greater than 0.5 m/s; duration must be
+positive. `undock_timeout` remains an independent movement deadline.
+
+Both supplied box approaches select `timed_reverse`: reverse along base X at 0.1 m/s for 3.0 s,
+without acquiring tags or odometry. This remains usable after the picked box
+moves with the robot. Lateral/yaw commands are zero; actual displacement and
+drift are not measured. Any collision STOP aborts immediately, with no timer
+pause or automatic resumption. Cancellation, invalid manipulation state, Nav2
+activity, timeout, and shutdown also stop motion. Existing tag-relative profiles
+retain their persistent-collision-stop handling.
+
+```bash
+# Check box-tag docking without motion; the pickup detector must be running.
+ros2 action send_goal /fine_align x2_navigation/action/FineAlign \
+  "{instance_id: 'tag:180', execute: false}" --feedback
+# Physical timed retreat, even if no tag is visible.
+ros2 action send_goal /undock x2_navigation/action/Undock \
+  "{profile_id: grey_box_dock}" --feedback
+```
+
+Undock feedback/results report `undock_mode` and `elapsed_time` in seconds.
+For timed mode, `distance_traveled` and feedback `distance_remaining` are
+command-based estimates, nominally 0.30 m total, and do not establish actual
+clearance. Rebuild and restart all `/fine_align` and `/undock` clients for the regenerated actions.
 
 Nav2 publishes `/cmd_vel_nav`. The lifecycle-managed `velocity_smoother` consumes
 that stream and publishes `/cmd_vel_nav_smoothed`; the fine-align server selects

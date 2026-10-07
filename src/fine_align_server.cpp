@@ -22,6 +22,7 @@
 #include <action_msgs/msg/goal_status.hpp>
 #include <action_msgs/msg/goal_status_array.hpp>
 #include <agibot_x2_manipulation_msgs/msg/manipulation_state.hpp>
+#include <agibot_x2_manipulation_msgs/msg/box_state_array.hpp>
 #include <apriltag_msgs/msg/april_tag_detection_array.hpp>
 #include <geometry_msgs/msg/pose2_d.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -61,7 +62,18 @@ public:
     const auto standoff = declare_parameter("standoff", 0.70, profile_descriptor);
     const auto lateral_offset = declare_parameter("lateral_offset", 0.0, profile_descriptor);
     const auto yaw_offset = declare_parameter("yaw_offset", 0.0, profile_descriptor);
-    profiles_.add({"default", tag_id, tag_frame, standoff, lateral_offset, yaw_offset});
+    const auto detections_topic = declare_parameter(
+      "detections_topic", "/front_center_rectify/detections", profile_descriptor);
+    const auto undock_mode = declare_parameter("undock_mode", "tag_relative", profile_descriptor);
+    const auto reverse_speed = declare_parameter("timed_reverse_speed", 0.1, profile_descriptor);
+    const auto reverse_duration = declare_parameter("timed_reverse_duration", 3.0, profile_descriptor);
+    std::set<std::string> detection_topics{detections_topic};
+    declare_parameter("target_source", "tag", profile_descriptor);
+    if (get_parameter("target_source").as_string() != "tag") {
+      throw std::invalid_argument("use a named profile for a box docking target");
+    }
+    profiles_.add({"default", tag_id, tag_frame, standoff, lateral_offset, yaw_offset,
+      detections_topic, undock_mode, reverse_speed, reverse_duration});
     const auto profile_names = declare_parameter<std::vector<std::string>>(
       "docking_profile_names", std::vector<std::string>{}, profile_descriptor);
     std::set<std::string> profile_names_seen{"default"};
@@ -83,12 +95,21 @@ public:
           }
           return value;
         };
+      const auto topic = declare_parameter(prefix + "detections_topic", detections_topic,
+        profile_descriptor);
+      detection_topics.insert(topic);
+      const auto source = declare_parameter(prefix + "target_source", "tag", profile_descriptor);
       profiles_.add({
-        name, required("tag_id", rclcpp::ParameterType::PARAMETER_INTEGER).get<std::int64_t>(),
+        name, source == "box" ? declare_parameter(prefix + "tag_id", -1, profile_descriptor) :
+        required("tag_id", rclcpp::ParameterType::PARAMETER_INTEGER).get<std::int64_t>(),
+        source == "box" ? declare_parameter(prefix + "tag_frame", "", profile_descriptor) :
         required("tag_frame", rclcpp::ParameterType::PARAMETER_STRING).get<std::string>(),
         required("standoff", rclcpp::ParameterType::PARAMETER_DOUBLE).get<double>(),
         required("lateral_offset", rclcpp::ParameterType::PARAMETER_DOUBLE).get<double>(),
-        required("yaw_offset", rclcpp::ParameterType::PARAMETER_DOUBLE).get<double>()});
+        required("yaw_offset", rclcpp::ParameterType::PARAMETER_DOUBLE).get<double>(),
+        topic, declare_parameter(prefix + "undock_mode", "tag_relative", profile_descriptor),
+        declare_parameter(prefix + "timed_reverse_speed", 0.1, profile_descriptor),
+        declare_parameter(prefix + "timed_reverse_duration", 3.0, profile_descriptor), source});
     }
     default_profile_ = declare_parameter("default_docking_profile", "default", profile_descriptor);
     active_profile_ = profiles_.resolve("", default_profile_);
@@ -203,14 +224,20 @@ public:
     const auto nav_raw_cmd_topic = declare_parameter("nav_raw_cmd_topic", "");
     nav_command_gate_ = NavigationCommandGate(!nav_raw_cmd_topic.empty());
     const auto raw_cmd_topic = declare_parameter("raw_cmd_topic", "/cmd_vel_raw");
-    const auto detections_topic = declare_parameter(
-      "detections_topic", "/front_center_rectify/detections");
-
-    detections_sub_ = create_subscription<apriltag_msgs::msg::AprilTagDetectionArray>(
-      detections_topic, rclcpp::SensorDataQoS(),
-      [this](apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message) {
-        std::lock_guard<std::mutex> lock(pending_detection_mutex_);
-        pending_detection_ = message;
+    for (const auto & topic : detection_topics) {
+      detections_subs_.push_back(
+        create_subscription<apriltag_msgs::msg::AprilTagDetectionArray>(
+          topic, rclcpp::SensorDataQoS(),
+          [this, topic](apriltag_msgs::msg::AprilTagDetectionArray::SharedPtr message) {
+            std::scoped_lock lock(measurement_mutex_, pending_detection_mutex_);
+            if (topic == active_profile_.detections_topic) {pending_detection_ = message;}
+          }));
+    }
+    box_states_sub_ = create_subscription<agibot_x2_manipulation_msgs::msg::BoxStateArray>(
+      declare_parameter("box_states_topic", "/box_states"), 10,
+      [this](agibot_x2_manipulation_msgs::msg::BoxStateArray::SharedPtr message) {
+        std::lock_guard<std::mutex> lock(measurement_mutex_);
+        for (const auto & box : message->boxes) {box_states_[box.instance_id] = box;}
       });
     state_sub_ = create_subscription<agibot_x2_manipulation_msgs::msg::ManipulationState>(
       "/manipulation_state", rclcpp::QoS(1).reliable().transient_local(),
@@ -297,12 +324,42 @@ private:
     std::string message;
   };
 
-  bool activateProfile(const std::string & requested, bool undocking, std::string & resolved)
+  bool activateProfile(const std::string & requested, bool undocking, std::string & resolved,
+    const std::string & instance_id = "")
   {
     std::scoped_lock lock(measurement_mutex_, pending_detection_mutex_);
     try {
+      std::string selection = requested;
+      const agibot_x2_manipulation_msgs::msg::BoxState * box = nullptr;
+      if (!undocking && !instance_id.empty()) {
+        const auto found = box_states_.find(instance_id);
+        if (found == box_states_.end()) {return false;}
+        const double age = (now() - rclcpp::Time(found->second.header.stamp)).seconds();
+        if (age < 0.0 || age > maximum_pose_age_) {return false;}
+        box = &found->second;
+        if (selection.empty()) {selection = box->default_docking_profile;}
+        if (selection.empty() || std::find(box->docking_profile_ids.begin(),
+            box->docking_profile_ids.end(), selection) == box->docking_profile_ids.end()) {
+          return false;
+        }
+      }
       active_profile_ = profiles_.resolve(
-        requested, default_profile_, undocking ? last_docked_profile_ : "");
+        selection, default_profile_, undocking ? last_docked_profile_ : "");
+      active_instance_id_.clear();
+      if (active_profile_.target_source == "box") {
+        if (!undocking) {
+          if (!box || box->tag_frame.empty()) {return false;}
+          active_profile_ = bindBoxDockingProfile(active_profile_, instance_id, box->tag_frame);
+          active_instance_id_ = instance_id;
+        } else if (last_docked_target_ && last_docked_target_->name == active_profile_.name) {
+          active_profile_ = *last_docked_target_;
+          active_instance_id_ = last_docked_instance_;
+        } else if (active_profile_.undock_mode != "timed_reverse") {
+          throw std::invalid_argument("box tag-relative undock requires a successful dock");
+        }
+      } else if (!instance_id.empty()) {
+        throw std::invalid_argument("instance_id requires a box docking profile");
+      }
     } catch (const std::invalid_argument &) {
       return false;
     }
@@ -481,8 +538,11 @@ private:
         return true;
       }
       auto feedback = std::make_shared<FineAlign::Feedback>();
-      feedback->profile_id = handle->get_goal()->profile_id.empty() ?
-        default_profile_ : handle->get_goal()->profile_id;
+      {
+        std::lock_guard<std::mutex> lock(measurement_mutex_);
+        feedback->profile_id = active_profile_.name;
+        feedback->instance_id = active_instance_id_;
+      }
       feedback->stage = feedback_stage;
       feedback->tag_visible = target_available;
       handle->publish_feedback(feedback);
@@ -533,6 +593,7 @@ private:
   {
     auto feedback = std::make_shared<FineAlign::Feedback>();
     feedback->profile_id = result.profile_id;
+    feedback->instance_id = result.instance_id;
     feedback->stage = FineAlign::Feedback::REACQUIRING;
     feedback->current_error = result.final_error;
     feedback->tag_visible = false;
@@ -694,6 +755,7 @@ private:
 
       auto feedback = std::make_shared<FineAlign::Feedback>();
       feedback->profile_id = result->profile_id;
+      feedback->instance_id = result->instance_id;
       feedback->stage = settling_pose ?
         FineAlign::Feedback::SETTLING : FineAlign::Feedback::CONTROLLING;
       feedback->current_error = errorMessage(error);
@@ -718,14 +780,19 @@ private:
     result->final_error.theta = std::numeric_limits<double>::quiet_NaN();
     result->manipulation_state =
       agibot_x2_manipulation_msgs::msg::ManipulationState::UNKNOWN;
-    if (!activateProfile(handle->get_goal()->profile_id, false, result->profile_id)) {
+    if (!activateProfile(handle->get_goal()->profile_id, false, result->profile_id,
+        handle->get_goal()->instance_id)) {
       finish(handle, result, FineAlign::Result::INVALID_PROFILE,
-        "unknown docking profile: " + handle->get_goal()->profile_id);
+        "invalid docking profile or box instance: " + handle->get_goal()->profile_id);
       return;
     }
     if (nav_active_.load()) {
       finish(handle, result, FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 is active");
       return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(measurement_mutex_);
+      result->instance_id = active_instance_id_;
     }
     const std::size_t maximum_attempts = handle->get_goal()->execute ? maximum_retries_ + 1U : 1U;
     std::uint64_t minimum_sequence = 0;
@@ -756,6 +823,8 @@ private:
         if (handle->get_goal()->execute) {
           std::lock_guard<std::mutex> lock(measurement_mutex_);
           last_docked_profile_ = result->profile_id;
+          last_docked_target_ = active_profile_;
+          last_docked_instance_ = result->instance_id;
         }
         handle->succeed(result);
         operation_active_.store(false);
@@ -809,13 +878,19 @@ private:
           std::chrono::steady_clock::now() - *collision_stop_since_).count();
       }
     }
+    double target_distance = undock_distance_;
+    if (result.undock_mode == "timed_reverse") {
+      std::lock_guard<std::mutex> lock(measurement_mutex_);
+      target_distance = active_profile_.timed_reverse_speed * active_profile_.timed_reverse_duration;
+    }
     RCLCPP_ERROR(
       get_logger(),
-      "Undock action abort: code=%u; reason='%s'; distance=(traveled=%.3f m, target=%.3f m); "
+      "Undock action abort: code=%u; reason='%s'; mode=%s; elapsed=%.3f s; "
+      "distance=(reported=%.3f m, target=%.3f m); "
       "manipulation_state=(result=%u, current=%u); nav_active=%s; "
       "collision_stopped=%s (age=%.3f s)",
-      static_cast<unsigned int>(code), message.c_str(), result.distance_traveled,
-      undock_distance_, static_cast<unsigned int>(result.manipulation_state),
+      static_cast<unsigned int>(code), message.c_str(), result.undock_mode.c_str(),
+      result.elapsed_time, result.distance_traveled, target_distance, static_cast<unsigned int>(result.manipulation_state),
       static_cast<unsigned int>(currentManipulationState()), nav_active_.load() ? "true" : "false",
       collision_stopped ? "true" : "false", collision_stop_age);
   }
@@ -841,6 +916,77 @@ private:
     operation_active_.store(false);
   }
 
+  void executeTimedUndock(const std::shared_ptr<UndockGoalHandle> & handle,
+    const std::shared_ptr<Undock::Result> & result, const DockingProfile & profile)
+  {
+    const auto start = std::chrono::steady_clock::now();
+    const double target_distance = profile.timed_reverse_speed * profile.timed_reverse_duration;
+    alignment_active_.store(true);
+    bool commanded_motion = false;
+    while (rclcpp::ok()) {
+      const auto control_time = std::chrono::steady_clock::now();
+      result->elapsed_time = commanded_motion ?
+        std::chrono::duration<double>(control_time - start).count() : 0.0;
+      result->distance_traveled = profile.timed_reverse_speed *
+        std::min(result->elapsed_time, profile.timed_reverse_duration);
+      result->manipulation_state = currentManipulationState();
+      bool collision_stopped;
+      {
+        std::lock_guard<std::mutex> lock(collision_mutex_);
+        collision_stopped = collision_stopped_;
+      }
+      if (handle->is_canceling() || nav_active_.load() || collision_stopped ||
+        !validState(result->manipulation_state))
+      {
+        finishUndock(handle, result,
+          handle->is_canceling() ? Undock::Result::CANCELED :
+          nav_active_.load() ? Undock::Result::NAVIGATION_ACTIVE :
+          collision_stopped ? Undock::Result::COLLISION_STOPPED : Undock::Result::INVALID_STATE,
+          "timed undocking interrupted by cancellation, navigation, collision stop, or state");
+        return;
+      }
+      // Respect the earlier deadline even when one controller tick crosses
+      // both. Equal deadlines allow a normally completed reverse to succeed.
+      if (undock_timeout_ < profile.timed_reverse_duration &&
+        result->elapsed_time >= undock_timeout_)
+      {
+        finishUndock(handle, result, Undock::Result::UNDOCK_TIMEOUT, "timed undocking timed out");
+        return;
+      }
+      if (result->elapsed_time >= profile.timed_reverse_duration) {
+        stopAlignment();
+        result->success = true;
+        result->error_code = Undock::Result::SUCCESS;
+        result->message = "timed reverse completed; distance is a command-based estimate";
+        handle->succeed(result);
+        operation_active_.store(false);
+        return;
+      }
+      geometry_msgs::msg::Twist command;
+      command.linear.x = -profile.timed_reverse_speed;
+      commanded_motion = true;
+      {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        alignment_command_ = command;
+        alignment_command_time_ = control_time;
+      }
+      auto feedback = std::make_shared<Undock::Feedback>();
+      feedback->profile_id = profile.name;
+      feedback->instance_id = result->instance_id;
+      feedback->undock_mode = profile.undock_mode;
+      feedback->elapsed_time = result->elapsed_time;
+      feedback->stage = Undock::Feedback::MOVING;
+      feedback->distance_traveled = result->distance_traveled;
+      feedback->distance_remaining = std::max(0.0, target_distance - result->distance_traveled);
+      feedback->commanded_speed = command.linear.x;
+      feedback->progress = static_cast<float>(result->elapsed_time / profile.timed_reverse_duration);
+      handle->publish_feedback(feedback);
+      std::this_thread::sleep_for(controller_period_);
+    }
+    finishUndock(handle, result, Undock::Result::SAFETY_ABORT,
+      "ROS shutdown interrupted timed undocking");
+  }
+
   void executeUndock(std::shared_ptr<UndockGoalHandle> handle)
   {
     auto result = std::make_shared<Undock::Result>();
@@ -851,10 +997,20 @@ private:
         "unknown docking profile: " + handle->get_goal()->profile_id);
       return;
     }
+    DockingProfile profile;
+    {
+      std::lock_guard<std::mutex> lock(measurement_mutex_);
+      profile = active_profile_;
+      result->instance_id = active_instance_id_;
+    }
+    result->undock_mode = profile.undock_mode;
     auto validating = std::make_shared<Undock::Feedback>();
     validating->profile_id = result->profile_id;
     validating->stage = Undock::Feedback::VALIDATING;
-    validating->distance_remaining = undock_distance_;
+    validating->instance_id = result->instance_id;
+    validating->undock_mode = result->undock_mode;
+    validating->distance_remaining = profile.undock_mode == "timed_reverse" ?
+      profile.timed_reverse_speed * profile.timed_reverse_duration : undock_distance_;
     handle->publish_feedback(validating);
 
     if (nav_active_.load()) {
@@ -867,6 +1023,11 @@ private:
         "manipulation state is not EMPTY or HOLDING");
       return;
     }
+    if (profile.undock_mode == "timed_reverse") {
+      executeTimedUndock(handle, result, profile);
+      return;
+    }
+    const auto undock_start = std::chrono::steady_clock::now();
     Eigen::Isometry3d initial;
     uint8_t state = result->manipulation_state;
     std::uint64_t sequence = 0;
@@ -977,7 +1138,11 @@ private:
           std::chrono::duration<double>(progress_log_interval_));
       }
       auto feedback = std::make_shared<Undock::Feedback>();
+      result->elapsed_time = std::chrono::duration<double>(control_time - undock_start).count();
+      feedback->undock_mode = result->undock_mode;
+      feedback->elapsed_time = result->elapsed_time;
       feedback->profile_id = result->profile_id;
+      feedback->instance_id = result->instance_id;
       feedback->stage = settling_pose ? Undock::Feedback::SETTLING : Undock::Feedback::MOVING;
       feedback->distance_traveled = result->distance_traveled;
       feedback->distance_remaining = remaining;
@@ -1133,7 +1298,8 @@ private:
 
   rclcpp_action::Server<FineAlign>::SharedPtr server_;
   rclcpp_action::Server<Undock>::SharedPtr undock_server_;
-  rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr detections_sub_;
+  std::vector<rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr>
+    detections_subs_;
   rclcpp::Subscription<agibot_x2_manipulation_msgs::msg::ManipulationState>::SharedPtr state_sub_;
   rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr nav_status_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_cmd_sub_;
@@ -1163,6 +1329,10 @@ private:
   std::atomic_bool operation_active_{false}, alignment_active_{false}, nav_active_{false};
   bool collision_stopped_{false};
   std::string base_frame_, default_profile_, last_docked_profile_;
+  std::string active_instance_id_, last_docked_instance_;
+  std::optional<DockingProfile> last_docked_target_;
+  rclcpp::Subscription<agibot_x2_manipulation_msgs::msg::BoxStateArray>::SharedPtr box_states_sub_;
+  std::map<std::string, agibot_x2_manipulation_msgs::msg::BoxState> box_states_;
   DockingProfiles profiles_;
   DockingProfile active_profile_;
   std::uint64_t profile_generation_{0};

@@ -8,7 +8,7 @@ import launch_testing.asserts
 import launch_testing.actions
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
-from agibot_x2_manipulation_msgs.msg import ManipulationState
+from agibot_x2_manipulation_msgs.msg import ManipulationState, BoxState, BoxStateArray
 from apriltag_msgs.msg import AprilTagDetection, AprilTagDetectionArray
 from geometry_msgs.msg import TransformStamped, Twist
 from launch_ros.actions import Node
@@ -30,7 +30,30 @@ def generate_test_description():
         parameters=[
             package_path / "config" / "nav2_params.yaml",
             {
-                "docking_profile_names": ["offset", "other_tag"],
+                "docking_profile_names": ["offset", "other_tag", "box", "box_b", "timed_timeout"],
+                "docking_profiles.timed_timeout.target_source": "box",
+                "docking_profiles.timed_timeout.standoff": 0.5,
+                "docking_profiles.timed_timeout.lateral_offset": 0.0,
+                "docking_profiles.timed_timeout.yaw_offset": 0.0,
+                "docking_profiles.timed_timeout.undock_mode": "timed_reverse",
+                # Both deadlines fall in the same controller tick. The shorter
+                # global timeout must win, rather than reporting completion.
+                "docking_profiles.timed_timeout.timed_reverse_duration": 3.000001,
+                "docking_profiles.box_b.target_source": "box",
+                "docking_profiles.box_b.standoff": 0.6,
+                "docking_profiles.box_b.lateral_offset": 0.0,
+                "docking_profiles.box_b.yaw_offset": 0.0,
+                "docking_profiles.box_b.detections_topic": "/detections",
+                "docking_profiles.box_b.undock_mode": "timed_reverse",
+                "docking_profiles.box_b.timed_reverse_duration": 0.6,
+                "docking_profiles.box.target_source": "box",
+                "docking_profiles.box.standoff": 0.5,
+                "docking_profiles.box.lateral_offset": 0.0,
+                "docking_profiles.box.yaw_offset": 0.0,
+                "docking_profiles.box.detections_topic": "/detections",
+                "docking_profiles.box.undock_mode": "timed_reverse",
+                "docking_profiles.box.timed_reverse_speed": 0.1,
+                "docking_profiles.box.timed_reverse_duration": 0.6,
                 "docking_profiles.offset.tag_id": 9,
                 "docking_profiles.offset.tag_frame": "tag9",
                 "docking_profiles.offset.standoff": 0.7,
@@ -96,6 +119,7 @@ class TestFineAlignServer(unittest.TestCase):
             "/front_center_rectify/detections",
             sensor_qos,
         )
+        self.box_states = self.node.create_publisher(BoxStateArray, "/box_states", 10)
         self.states = self.node.create_publisher(
             ManipulationState, "/manipulation_state", state_qos
         )
@@ -216,6 +240,14 @@ class TestFineAlignServer(unittest.TestCase):
         state = ManipulationState()
         state.state = self.manipulation_state
         self.states.publish(state)
+        box = BoxState()
+        box.header.stamp = stamp
+        box.instance_id = f"tag:{self.tag_id}"
+        box.profile_id = "box_b_type" if self.tag_id == 42 else "box_a_type"
+        box.docking_profile_ids = ["box_b"] if self.tag_id == 42 else ["box"]
+        box.default_docking_profile = box.docking_profile_ids[0]
+        box.tag_frame = self.tag_frame
+        self.box_states.publish(BoxStateArray(boxes=[box]))
 
         odometry = Odometry()
         odometry.header.stamp = stamp
@@ -268,14 +300,17 @@ class TestFineAlignServer(unittest.TestCase):
             self.publish_inputs()
             rclpy.spin_once(self.node, timeout_sec=0.05)
 
-    def submit_profile(self, profile="", execute=False, undock=False, inputs=True):
+    def submit_profile(self, profile="", execute=False, undock=False, inputs=True, instance_id=""):
         goal = Undock.Goal() if undock else FineAlign.Goal()
         goal.profile_id = profile
         if not undock:
+            goal.instance_id = instance_id
             goal.execute = execute
         feedback = []
         client = self.undock_client if undock else self.client
         spin = self.spin_with_inputs_until if inputs else self.spin_until
+        if instance_id:
+            self.spin_with_inputs_until(lambda: False, timeout=0.2)
         sent = client.send_goal_async(
             goal, feedback_callback=lambda message: feedback.append(message.feedback)
         )
@@ -549,6 +584,113 @@ class TestFineAlignServer(unittest.TestCase):
         result = handle.get_result_async()
         self.assertTrue(self.spin_with_inputs_until(result.done))
         self.assertFalse(result.result().result.success)
+
+    def test_timed_undock_without_tags_or_odometry(self):
+        self.publish_tags = False
+        self.publish_odometry = False
+        self.assertTrue(self.spin_with_inputs_until(lambda: len(self.commands) > 0))
+        started = time.monotonic()
+        result, feedback = self.submit_profile("box", undock=True)
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.undock_mode, "timed_reverse")
+        self.assertGreaterEqual(result.elapsed_time, 0.6)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertAlmostEqual(result.distance_traveled, 0.06)
+        self.assertTrue(any(f.commanded_speed < 0 for f in feedback))
+        self.assertTrue(all(f.commanded_lateral_speed == 0 and f.commanded_yaw_speed == 0
+                            for f in feedback))
+        self.assertTrue(self.spin_with_inputs_until(lambda: self.commands[-1].linear.x == 0))
+
+    def test_timed_undock_aborts_immediately_on_collision(self):
+        self.publish_tags = False
+        self.collision_stopped = True
+        self.spin_with_inputs_until(lambda: False, timeout=0.2)
+        started = time.monotonic()
+        result, _ = self.submit_profile("box", undock=True)
+        self.assertEqual(result.error_code, Undock.Result.COLLISION_STOPPED)
+        self.assertLess(time.monotonic() - started, 0.6)
+        self.assertEqual(result.distance_traveled, 0.0)
+
+    def test_timed_undock_cancellation_and_navigation_stop_motion(self):
+        self.publish_tags = False
+        for cancel in (True, False):
+            self.nav_active = False
+            self.spin_with_inputs_until(lambda: False, timeout=0.15)
+            sent = self.undock_client.send_goal_async(Undock.Goal(profile_id="box"))
+            self.assertTrue(self.spin_with_inputs_until(sent.done))
+            handle = sent.result()
+            self.assertTrue(handle.accepted)
+            result = handle.get_result_async()
+            self.assertTrue(self.spin_with_inputs_until(
+                lambda: bool(self.commands) and self.commands[-1].linear.x < 0))
+            if cancel:
+                canceled = handle.cancel_goal_async()
+                self.assertTrue(self.spin_with_inputs_until(canceled.done))
+            else:
+                self.nav_active = True
+            self.assertTrue(self.spin_with_inputs_until(result.done))
+            wrapped = result.result()
+            self.assertEqual(wrapped.result.error_code,
+                Undock.Result.CANCELED if cancel else Undock.Result.NAVIGATION_ACTIVE)
+            self.assertTrue(self.spin_with_inputs_until(lambda: self.commands[-1].linear.x == 0))
+
+    def test_timed_undock_rejects_invalid_state(self):
+        self.publish_tags = False
+        self.manipulation_state = 0
+        self.spin_with_inputs_until(lambda: False, timeout=0.2)
+        result, _ = self.submit_profile("box", undock=True)
+        self.assertEqual(result.error_code, Undock.Result.INVALID_STATE)
+
+    def test_timed_undock_timeout_precedes_longer_reverse_duration(self):
+        self.publish_tags = False
+        self.publish_odometry = False
+        self.warm_up_inputs(0.2)
+        result, _ = self.submit_profile("timed_timeout", undock=True)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, Undock.Result.UNDOCK_TIMEOUT)
+        self.assertTrue(self.spin_with_inputs_until(lambda: self.commands[-1].linear.x == 0))
+
+    def test_box_dock_uses_its_detection_source(self):
+        self.tag_id = 180
+        self.tag_frame = "tag180"
+        result, _ = self.submit_profile("box", instance_id="tag:180")
+        self.assertEqual(result.error_code, FineAlign.Result.NO_STABLE_TAG)
+        self.detections = self.node.create_publisher(
+            AprilTagDetectionArray, "/detections", rclpy.qos.qos_profile_sensor_data)
+        result, _ = self.submit_profile("box", instance_id="tag:180")
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.profile_id, "box")
+
+    def test_box_dock_rejects_another_box_types_approach(self):
+        self.tag_id = 42
+        self.tag_frame = "tag42"
+        result, _ = self.submit_profile("box", instance_id="tag:42")
+        self.assertEqual(result.error_code, FineAlign.Result.INVALID_PROFILE)
+
+    def test_box_dock_requires_explicit_instance(self):
+        result, _ = self.submit_profile("box")
+        self.assertEqual(result.error_code, FineAlign.Result.INVALID_PROFILE)
+
+    def test_z_box_profile_binds_two_instances_and_remembers_pick_target(self):
+        self.detections = self.node.create_publisher(
+            AprilTagDetectionArray, "/detections", rclpy.qos.qos_profile_sensor_data)
+        self.tag_x = 0.5
+        self.tag_y = 0.0
+        for tag_id in (17, 42):
+            self.publish_tags = True
+            self.tag_id = tag_id
+            self.tag_x = 0.6 if tag_id == 42 else 0.5
+            self.tag_frame = f"tag{tag_id}"
+            result, feedback = self.submit_profile(execute=True, instance_id=f"tag:{tag_id}")
+            self.assertTrue(result.success, result.message)
+            self.assertEqual(result.instance_id, f"tag:{tag_id}")
+            self.assertTrue(all(f.instance_id == result.instance_id for f in feedback))
+            self.assertTrue(all(f.profile_id == result.profile_id for f in feedback))
+            self.publish_tags = False
+            retreat, _ = self.submit_profile(undock=True)
+            self.assertTrue(retreat.success, retreat.message)
+            self.assertEqual(retreat.profile_id, "box_b" if tag_id == 42 else "box")
+            self.assertEqual(retreat.instance_id, result.instance_id)
 
     def test_undock_commands_reverse_x_and_completes_from_tag(self):
         self.warm_up_inputs()

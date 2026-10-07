@@ -57,3 +57,50 @@ TEST(DockingProfiles, RejectsInvalidAndDuplicateConfigurations)
   profile.yaw_offset = std::numeric_limits<double>::infinity();
   EXPECT_THROW(profiles.add(profile), std::invalid_argument);
 }
+
+TEST(DockingProfiles, SupportsTimedBoxProfileAndRejectsInvalidSettings)
+{
+  DockingProfile box{"grey_box", 180, "tag180", 0.5, 0.0, 0.0,
+    "/detections", "timed_reverse", 0.1, 3.0};
+  DockingProfiles profiles;
+  profiles.add(box);
+  const auto & selected = profiles.resolve("", "default", "grey_box");
+  EXPECT_EQ(selected.detections_topic, "/detections");
+  EXPECT_EQ(selected.undock_mode, "timed_reverse");
+  for (const double value : {0.0, -0.1, std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::quiet_NaN()})
+  {
+    auto invalid = box;
+    invalid.timed_reverse_duration = value;
+    EXPECT_THROW(DockingProfiles{}.add(invalid), std::invalid_argument);
+    invalid = box;
+    invalid.timed_reverse_speed = value;
+    EXPECT_THROW(DockingProfiles{}.add(invalid), std::invalid_argument);
+  }
+  box.timed_reverse_speed = 0.51;
+  EXPECT_THROW(DockingProfiles{}.add(box), std::invalid_argument);
+  box.timed_reverse_speed = 0.1;
+  box.undock_mode = "fallback";
+  EXPECT_THROW(DockingProfiles{}.add(box), std::invalid_argument);
+  box.undock_mode = "tag_relative";
+  box.detections_topic.clear();
+  EXPECT_THROW(DockingProfiles{}.add(box), std::invalid_argument);
+}
+
+TEST(DockingProfiles, BindsAnyBoxInstanceWithoutChangingTemplate)
+{
+  x2_navigation::DockingProfile box{"box", -1, "", 0.5, 0.0, 0.0,
+    "/detections", "timed_reverse", 0.1, 3.0, "box"};
+  DockingProfiles profiles;
+  profiles.add(box);
+  for (const auto & instance : {"tag:0", "tag:17", "tag:180"}) {
+    const auto bound = x2_navigation::bindBoxDockingProfile(profiles.resolve("box", "default"), instance, "marker_" + std::string(instance).substr(4));
+    EXPECT_EQ(bound.tag_frame, "marker_" + std::string(instance).substr(4));
+    EXPECT_GE(bound.tag_id, 0);
+    EXPECT_EQ(bound.name, "box");
+  }
+  EXPECT_EQ(profiles.resolve("box", "default").tag_id, -1);
+  for (const auto & invalid : {"", "legacy", "tag:-1", "tag:01", "tag:1x", "tag:2147483648"}) {
+    EXPECT_THROW(x2_navigation::bindBoxDockingProfile(box, invalid, "tag17"), std::invalid_argument);
+  }
+}

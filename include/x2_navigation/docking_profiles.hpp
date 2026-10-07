@@ -1,7 +1,9 @@
 #ifndef X2_NAVIGATION__DOCKING_PROFILES_HPP_
 #define X2_NAVIGATION__DOCKING_PROFILES_HPP_
 
+#include <charconv>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <map>
 #include <stdexcept>
@@ -18,7 +20,32 @@ struct DockingProfile
   double standoff;
   double lateral_offset;
   double yaw_offset;
+  std::string detections_topic{"/front_center_rectify/detections"};
+  std::string undock_mode{"tag_relative"};
+  double timed_reverse_speed{0.1};
+  double timed_reverse_duration{3.0};
+  std::string target_source{"tag"};
 };
+
+// BoxState instance IDs encode the physical AprilTag, independently of box type.
+inline DockingProfile bindBoxDockingProfile(
+  DockingProfile profile, const std::string & instance_id, const std::string & tag_frame)
+{
+  if (profile.target_source != "box" || instance_id.rfind("tag:", 0) != 0 || tag_frame.empty()) {
+    throw std::invalid_argument("box docking requires a tag:<id> instance");
+  }
+  const auto id_text = instance_id.substr(4);
+  std::int64_t id = -1;
+  const auto parsed = std::from_chars(id_text.data(), id_text.data() + id_text.size(), id);
+  if (parsed.ec != std::errc{} || parsed.ptr != id_text.data() + id_text.size() || id < 0 ||
+    id > std::numeric_limits<std::int32_t>::max() || std::to_string(id) != id_text)
+  {
+    throw std::invalid_argument("invalid box tag instance: " + instance_id);
+  }
+  profile.tag_id = id;
+  profile.tag_frame = tag_frame;
+  return profile;
+}
 
 class DockingProfiles
 {
@@ -27,7 +54,13 @@ public:
   {
     if (profile.name.empty() || profile.name.find_first_not_of(
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos ||
-      profile.tag_id < 0 || profile.tag_frame.empty() ||
+      (profile.target_source != "tag" && profile.target_source != "box") ||
+      (profile.target_source == "tag" && (profile.tag_id < 0 || profile.tag_frame.empty())) ||
+      profile.detections_topic.empty() ||
+      (profile.undock_mode != "tag_relative" && profile.undock_mode != "timed_reverse") ||
+      !std::isfinite(profile.timed_reverse_speed) || profile.timed_reverse_speed <= 0.0 ||
+      profile.timed_reverse_speed > 0.5 || !std::isfinite(profile.timed_reverse_duration) ||
+      profile.timed_reverse_duration <= 0.0 ||
       !std::isfinite(profile.standoff) || profile.standoff <= 0.0 ||
       !std::isfinite(profile.lateral_offset) || !std::isfinite(profile.yaw_offset))
     {
