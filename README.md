@@ -92,6 +92,23 @@ its resolved name. Empty `/fine_align` selection uses `default_docking_profile`
 `tag_id`, `tag_frame`, `standoff`, `lateral_offset`, and `yaw_offset` parameters,
 including the currently configured tag9 and 0.50 m stand-off.
 
+The shipped docking profile names match the manipulation table profiles:
+`trolley` uses tag ID 7, TF frame `tag7`, and a 1.0 m stand-off; `default` uses
+tag ID 9, TF frame `tag9`, and a 0.50 m stand-off. Both have zero lateral/yaw
+offsets. The former docking names `tag7` and `tag9` are no longer configured;
+update clients to use `trolley` and `default`, respectively. Select either explicitly
+with `profile_id`; empty selection still uses `default`.
+Restart the fine alignment server after updating
+its configuration, and ensure the detector publishes the selected tag and its
+matching timestamped TF frame. Validate each without motion before use:
+
+```bash
+ros2 action send_goal /fine_align x2_navigation/action/FineAlign \
+  "{profile_id: trolley, execute: false}" --feedback
+ros2 action send_goal /fine_align x2_navigation/action/FineAlign \
+  "{profile_id: default, execute: false}" --feedback
+```
+
 Additional profiles are startup ROS parameters. For example, merge the following
 into `fine_align_server.ros__parameters` in your navigation parameter file:
 

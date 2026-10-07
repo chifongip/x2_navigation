@@ -369,6 +369,26 @@ def test_navigation_launch_consumes_existing_robot_state():
     assert 'package="x2_bringup"' not in launch_source
 
 
+def test_named_dock_configuration():
+    configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
+    fine_align = configuration["fine_align_server"]["ros__parameters"]
+
+    assert fine_align["docking_profile_names"] == ["trolley"]
+    assert fine_align["docking_profiles"]["trolley"] == {
+        "tag_id": 7,
+        "tag_frame": "tag7",
+        "standoff": 1.0,
+        "lateral_offset": 0.0,
+        "yaw_offset": 0.0,
+    }
+    assert fine_align["default_docking_profile"] == "default"
+    assert fine_align["tag_id"] == 9
+    assert fine_align["tag_frame"] == "tag9"
+    assert fine_align["standoff"] == 0.5
+    assert fine_align["lateral_offset"] == 0.0
+    assert fine_align["yaw_offset"] == 0.0
+
+
 def test_fine_alignment_docking_and_collision_safety_configuration():
     configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
     assert "docking_server" not in configuration

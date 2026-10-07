@@ -143,6 +143,14 @@ fine_align_server:
     # Additional named profiles use docking_profiles.<name> fields.
     # The default profile retains the legacy tag and geometry settings below.
     default_docking_profile: default
+    docking_profile_names: [trolley]
+    docking_profiles:
+      trolley:
+        tag_id: 7
+        tag_frame: tag7
+        standoff: 1.0
+        lateral_offset: 0.0
+        yaw_offset: 0.0
     tag_frame: tag9
     tag_id: 9
     detections_topic: /front_center_rectify/detections
