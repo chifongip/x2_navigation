@@ -32,12 +32,12 @@ lidar_cloud_throttle:
 # Collision Monitor and Nav2 use their own tuned robot footprint below.
 payload_cloud_filter:
   ros__parameters:
-    min_x: 0.20
-    max_x: 0.50
-    min_y: -0.22
-    max_y: 0.22
-    min_z: 0.03
-    max_z: 0.56
+    min_x: 0.0
+    max_x: 0.6
+    min_y: -0.25
+    max_y: 0.25
+    min_z: -0.5
+    max_z: 0.5
 
 bt_navigator:
   ros__parameters:
@@ -102,13 +102,13 @@ controller_server:
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist, PreferForward]
+      critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist] # , PreferForward]
       # Prefer forward travel while retaining reverse motion when needed.
-      PreferForward.scale: 1.0
-      PreferForward.penalty: 10.0
-      PreferForward.theta_scale: 1.0
-      PreferForward.strafe_x: 0.05
-      PreferForward.strafe_theta: 0.2
+      # PreferForward.scale: 1.0
+      # PreferForward.penalty: 10.0
+      # PreferForward.theta_scale: 1.0
+      # PreferForward.strafe_x: 0.05
+      # PreferForward.strafe_theta: 0.2
       BaseObstacle.scale: 0.02
       PathAlign.scale: 24.0
       PathAlign.forward_point_distance: 0.15
@@ -148,14 +148,14 @@ fine_align_server:
       trolley:
         tag_id: 7
         tag_frame: tag7
-        standoff: 1.0
+        standoff: 1.1
         lateral_offset: 0.0
         yaw_offset: 0.0
     tag_frame: tag9
     tag_id: 9
     detections_topic: /front_center_rectify/detections
     minimum_decision_margin: 20.0
-    standoff: 0.5
+    standoff: 0.55
     lateral_offset: 0.0
     yaw_offset: 0.0
     maximum_pose_age: 2.5
@@ -204,9 +204,9 @@ fine_align_server:
     angular_speed_min: 0.1
     angular_speed_max: 0.1
     translation_yaw_stop: 0.3490658504
-    x_position_tolerance: 0.1
-    y_position_tolerance: 0.1
-    yaw_tolerance: 0.174532925
+    x_position_tolerance: 0.05
+    y_position_tolerance: 0.05
+    yaw_tolerance: 0.0872664626
     # Legacy measured-velocity limits are ignored; visual settling uses spread limits.
     settled_linear_velocity: 0.05
     settled_angular_velocity: 0.05
