@@ -41,12 +41,7 @@ def test_navigation_velocity_footprint_and_costmap_settings():
     assert controller["min_vel_theta"] == -1.0
     assert controller["max_vel_theta"] == 1.0
     assert controller["max_speed_theta"] == 1.0
-    assert "PreferForward" in controller["critics"]
-    assert controller["PreferForward.scale"] == 1.0
-    assert controller["PreferForward.penalty"] == 10.0
-    assert controller["PreferForward.theta_scale"] == 1.0
-    assert controller["PreferForward.strafe_x"] == 0.05
-    assert controller["PreferForward.strafe_theta"] == 0.2
+    assert "PreferForward" not in controller["critics"]
 
     local_costmap = configuration["local_costmap"]["local_costmap"]["ros__parameters"]
     global_costmap = configuration["global_costmap"]["global_costmap"]["ros__parameters"]
@@ -99,13 +94,29 @@ def test_navigation_velocity_footprint_and_costmap_settings():
 
     payload_filter = configuration["payload_cloud_filter"]["ros__parameters"]
     assert payload_filter == {
-        "min_x": 0.20,
-        "max_x": 0.50,
-        "min_y": -0.22,
-        "max_y": 0.22,
-        "min_z": 0.03,
-        "max_z": 0.56,
+        "min_x": 0.0,
+        "max_x": 0.6,
+        "min_y": -0.25,
+        "max_y": 0.25,
+        "min_z": -0.5,
+        "max_z": 0.5,
     }
+
+
+def test_recovery_collision_checker_matches_local_costmap_on_humble():
+    configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
+    behavior = configuration["behavior_server"]["ros__parameters"]
+    local = configuration["local_costmap"]["local_costmap"]["ros__parameters"]
+
+    assert behavior["global_frame"] == local["global_frame"] == "odom"
+    assert behavior["robot_base_frame"] == local["robot_base_frame"]
+    assert behavior["costmap_topic"] == "local_costmap/costmap_raw"
+    assert behavior["footprint_topic"] == "local_costmap/published_footprint"
+    assert behavior["transform_tolerance"] == 0.2
+    assert not {
+        "local_frame", "local_costmap_topic", "global_costmap_topic",
+        "local_footprint_topic", "global_footprint_topic", "transform_timeout",
+    }.intersection(behavior)
 
 
 def test_navigation_velocity_zmq_bridge_settings():
@@ -377,14 +388,14 @@ def test_named_dock_configuration():
     assert fine_align["docking_profiles"]["trolley"] == {
         "tag_id": 7,
         "tag_frame": "tag7",
-        "standoff": 1.0,
+        "standoff": 1.1,
         "lateral_offset": 0.0,
         "yaw_offset": 0.0,
     }
     assert fine_align["default_docking_profile"] == "default"
     assert fine_align["tag_id"] == 9
     assert fine_align["tag_frame"] == "tag9"
-    assert fine_align["standoff"] == 0.5
+    assert fine_align["standoff"] == 0.55
     assert fine_align["lateral_offset"] == 0.0
     assert fine_align["yaw_offset"] == 0.0
 
@@ -395,7 +406,7 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
 
     fine_align = configuration["fine_align_server"]["ros__parameters"]
     assert fine_align["default_docking_profile"] == "default"
-    assert fine_align["standoff"] == 0.5
+    assert fine_align["standoff"] == 0.55
     assert fine_align["capture_distance"] == 1.5
     assert fine_align["capture_lateral"] == 1.5
     assert fine_align["capture_yaw"] == 0.785398163
@@ -418,10 +429,10 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     assert fine_align["angular_speed_min"] == 0.1
     assert fine_align["angular_speed_max"] == 0.1
     assert fine_align["translation_yaw_stop"] == 0.3490658504
-    assert fine_align["x_position_tolerance"] == 0.1
-    assert fine_align["y_position_tolerance"] == 0.1
+    assert fine_align["x_position_tolerance"] == 0.05
+    assert fine_align["y_position_tolerance"] == 0.05
     assert "position_tolerance" not in fine_align
-    assert fine_align["yaw_tolerance"] == 0.174532925
+    assert fine_align["yaw_tolerance"] == 0.0872664626
     assert fine_align["settled_linear_velocity"] == 0.05
     assert fine_align["settled_sample_count"] >= 3
     assert fine_align["allow_reverse_x"] is True
@@ -440,7 +451,7 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     assert collision["chest_cloud"]["topic"] == "/scan_nav/payload_filtered_cloud"
 
     payload_filter = configuration["payload_cloud_filter"]["ros__parameters"]
-    assert payload_filter["min_x"] > max(footprint_stop["points"][::2])
+    assert payload_filter["min_x"] < max(footprint_stop["points"][::2])
     assert payload_filter["max_x"] > max(footprint_stop["points"][::2])
 
     launch_source = LAUNCH_FILE.read_text(encoding="utf-8")

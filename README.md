@@ -471,6 +471,20 @@ required clearance around obstacles.
 Point-cloud clearing raytraces only to retained returns. Unlike a LaserScan,
 it has no infinity returns to clear empty sectors out to maximum range.
 
+On ROS 2 Humble, `behavior_server` uses `costmap_topic` and `footprint_topic`
+for a single collision checker. Its `global_frame` must match the local
+costmap's `odom` frame, even though the planner and navigator use `map`.
+The newer `local_frame` and `local_costmap_topic` parameters do not configure
+Humble's checker. A mismatch can make backup and spin fail immediately with
+`Pose Goes Off Grid` when localization introduces a `map -> odom` offset.
+The behavior server's TF wait is configured by `transform_tolerance`.
+
+If planning still fails after recovery frames are corrected, inspect the live
+`/global_costmap/costmap` in RViz at the robot, goal, and connecting corridor.
+Free cells in the map image do not guarantee a route through the live obstacle
+and inflation layers. Confirm the map selected with the launch `map` argument
+matches localization; clearing costmaps does not change static-map geometry.
+
 `pointcloud_to_laserscan` is a standard ROS 2 package used only to make a
 lightweight map-alignment view for `x2_operator_panel`; Nav2 continues to use
 `/scan_nav/payload_filtered_cloud`. The converter consumes the filtered
