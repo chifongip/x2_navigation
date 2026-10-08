@@ -191,6 +191,28 @@ TEST(TagPoseSettling, RequiresNewObservationsAndResetsOnMotion)
   EXPECT_FALSE(settling.update(true, 3.0, 7, initial, 0.5, 0.02, 0.04));
 }
 
+TEST(TagPoseSettling, CanStartAtZeroAndNeedsANewObservation)
+{
+  TagPoseSettling settling;
+  const PlanarError pose{};
+  EXPECT_FALSE(settling.update(true, 0.0, 0, pose, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(true, 1.0, 0, pose, 0.5, 0.02, 0.04));
+  EXPECT_TRUE(settling.update(true, 1.1, 1, pose, 0.5, 0.02, 0.04));
+}
+
+TEST(TagPoseSettling, InvalidObservationsRestartTheFullSettlingWindow)
+{
+  TagPoseSettling settling;
+  const PlanarError pose{};
+  EXPECT_FALSE(settling.update(false, 0.0, 0, pose, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(true, 1.0, 1, pose, 0.5, 0.02, 0.04));
+  EXPECT_TRUE(settling.update(true, 2.0, 2, pose, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(false, 3.0, 3, pose, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(true, 4.0, 4, pose, 0.5, 0.02, 0.04));
+  EXPECT_FALSE(settling.update(true, 4.25, 5, pose, 0.5, 0.02, 0.04));
+  EXPECT_TRUE(settling.update(true, 4.5, 6, pose, 0.5, 0.02, 0.04));
+}
+
 TEST(TagRelativeUndocking, MeasuresRetreatInInitialRobotFrame)
 {
   const auto initial_to_dock = planarPose({0.6, 0.2, 0.3});

@@ -270,10 +270,10 @@ public:
     double duration, double position_spread, double angular_spread)
   {
     if (!valid) {
-      started_.reset();
+      active_ = false;
       return false;
     }
-    if (!started_) {
+    if (!active_) {
       start(now, sequence, observed);
       return false;
     }
@@ -287,7 +287,7 @@ public:
       start(now, sequence, observed);
       return false;
     }
-    return now - *started_ >= duration;
+    return now - started_ >= duration;
   }
 
 private:
@@ -296,9 +296,11 @@ private:
     started_ = now;
     sequence_ = sequence;
     anchor_ = observed;
+    active_ = true;
   }
 
-  std::optional<double> started_;
+  double started_{0.0};
+  bool active_{false};
   std::uint64_t sequence_{0};
   PlanarError anchor_;
 };
