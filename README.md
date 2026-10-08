@@ -479,6 +479,32 @@ Humble's checker. A mismatch can make backup and spin fail immediately with
 `Pose Goes Off Grid` when localization introduces a `map -> odom` offset.
 The behavior server's TF wait is configured by `transform_tolerance`.
 
+Both costmaps use `x2_navigation::PointCloudObstacleLayer`, a subclass of the
+[official Humble obstacle layer](https://github.com/ros-navigation/navigation2/blob/humble/nav2_costmap_2d/plugins/obstacle_layer.cpp).
+It replaces the asynchronous TF message filter with a
+bounded queue (50 clouds per source), polled during costmap updates. Clouds
+wait up to the costmap's `transform_tolerance` for transforms at their original
+timestamp, including the physical sensor origin. Expired or unstamped clouds
+are dropped; no latest-pose substitution is used. A usable newer cloud
+supersedes older clouds still waiting for TF, so delayed observations cannot
+overwrite it. Final transforms in Nav2's observation buffer use zero timeout,
+so losing TF after the readiness check cannot make a costmap update wait for TF.
+Marking, raytracing, ranges, height filtering, persistence, and inflation
+retain the existing settings. Cloud processing runs at the costmap update rate;
+the queue deadline must allow at least one update cycle (the configured 5 s
+tolerance exceeds both update periods).
+This layer supports `PointCloud2` sources only.
+
+This avoids the Humble TF message-filter lock inversion reported in
+[geometry2 issue 992](https://github.com/ros2/geometry2/issues/992). In the
+affected robot, the point-cloud callback was blocked in
+`Buffer::waitForTransform -> BufferCore::addTransformableRequest` while the
+TF listener was blocked in `BufferCore::testTransformableRequests`.
+External TF and odometry remained fresh, but the local costmap footprint
+timestamp and controller transform timestamp froze together. Restarting is
+needed to replace a buffer that is already deadlocked; clearing costmaps or
+increasing TF tolerance cannot release those locks.
+
 If planning still fails after recovery frames are corrected, inspect the live
 `/global_costmap/costmap` in RViz at the robot, goal, and connecting corridor.
 Free cells in the map image do not guarantee a route through the live obstacle

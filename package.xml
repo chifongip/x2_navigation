@@ -17,6 +17,8 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>nav2_msgs</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>pluginlib</depend>
   <depend>rcl_interfaces</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
@@ -39,7 +41,6 @@
   <exec_depend>nav2_common</exec_depend>
   <exec_depend>nav2_controller</exec_depend>
   <exec_depend>nav2_velocity_smoother</exec_depend>
-  <exec_depend>nav2_costmap_2d</exec_depend>
   <exec_depend>nav2_dwb_controller</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>

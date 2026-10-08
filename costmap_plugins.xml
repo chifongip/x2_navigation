@@ -1,0 +1,5 @@
+<library path="point_cloud_obstacle_layer">
+  <class type="x2_navigation::PointCloudObstacleLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>Point-cloud obstacle layer with bounded polling for timestamp-valid TF.</description>
+  </class>
+</library>

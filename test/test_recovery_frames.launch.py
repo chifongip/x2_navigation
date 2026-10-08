@@ -53,6 +53,7 @@ class TestRecoveryFrames(unittest.TestCase):
     def setUp(self):
         self.node = rclpy.create_node("test_recovery_frames")
         self.commands = []
+        self.collision_input_samples = 0
         self.node.create_subscription(
             Twist, "/test/recovery/cmd_vel", self.commands.append, 10,
         )
@@ -85,6 +86,7 @@ class TestRecoveryFrames(unittest.TestCase):
             [(0.15, 0.30), (0.15, -0.30), (-0.15, -0.30), (-0.15, 0.30)]
         ]
         self.footprint_pub.publish(footprint)
+        self.collision_input_samples += 1
 
     def wait_until(self, predicate, timeout=10.0):
         deadline = time.monotonic() + timeout
@@ -97,6 +99,11 @@ class TestRecoveryFrames(unittest.TestCase):
     def test_backup_and_spin_check_odom_costmap_with_map_offset(self):
         # Let subscriptions and TF become ready before starting either action.
         self.wait_until(lambda: self.costmap_pub.get_subscription_count() > 0)
+        self.wait_until(lambda: self.footprint_pub.get_subscription_count() > 0)
+        # Endpoint discovery precedes the first timer callback and delivery.
+        # Warm both collision inputs before the first action checks the grid.
+        self.collision_input_samples = 0
+        self.wait_until(lambda: self.collision_input_samples >= 5)
         for action_type, name in [(BackUp, "backup"), (Spin, "spin")]:
             with self.subTest(behavior=name):
                 client = ActionClient(self.node, action_type, name)

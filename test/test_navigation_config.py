@@ -56,7 +56,7 @@ def test_navigation_velocity_footprint_and_costmap_settings():
     ]
 
     obstacle_layer = local_costmap["obstacle_layer"]
-    assert obstacle_layer["plugin"] == "nav2_costmap_2d::ObstacleLayer"
+    assert obstacle_layer["plugin"] == "x2_navigation::PointCloudObstacleLayer"
     assert obstacle_layer["min_obstacle_height"] == -1.0
     assert obstacle_layer["max_obstacle_height"] == 2.0
     assert obstacle_layer["footprint_clearing_enabled"] is True
@@ -550,7 +550,8 @@ def test_undocking_uses_holonomic_drift_correction_with_diagnostics():
 def test_navigation_runtime_dependencies_and_resources_are_packaged():
     package = ET.parse(PACKAGE_XML).getroot()
     exec_dependencies = {
-        dependency.text for dependency in package.findall("exec_depend")
+        dependency.text for dependency in
+        package.findall("exec_depend") + package.findall("depend")
     }
 
     assert {

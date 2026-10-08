@@ -9,6 +9,8 @@ find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(pluginlib REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -26,6 +28,14 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/Undock.action"
   DEPENDENCIES geometry_msgs
 )
+
+add_library(point_cloud_obstacle_layer SHARED src/point_cloud_obstacle_layer.cpp)
+target_compile_features(point_cloud_obstacle_layer PUBLIC cxx_std_17)
+target_compile_options(point_cloud_obstacle_layer PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(point_cloud_obstacle_layer PUBLIC include)
+ament_target_dependencies(point_cloud_obstacle_layer nav2_costmap_2d pluginlib)
+pluginlib_export_plugin_description_file(nav2_costmap_2d costmap_plugins.xml)
+install(TARGETS point_cloud_obstacle_layer LIBRARY DESTINATION lib)
 
 add_library(point_cloud_voxel_filter STATIC src/point_cloud_voxel_filter.cpp)
 target_compile_features(point_cloud_voxel_filter PUBLIC cxx_std_17)
@@ -112,6 +122,11 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
+
+  ament_add_gtest(test_point_cloud_obstacle_layer test/test_point_cloud_obstacle_layer.cpp)
+  target_compile_options(test_point_cloud_obstacle_layer PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(test_point_cloud_obstacle_layer point_cloud_obstacle_layer)
+  ament_target_dependencies(test_point_cloud_obstacle_layer nav2_costmap_2d)
 
   ament_add_gtest(test_odometry_transform test/test_odometry_transform.cpp)
   target_compile_options(test_odometry_transform PRIVATE -Wall -Wextra -Wpedantic)
