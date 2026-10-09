@@ -536,3 +536,13 @@ The default timestamp offset is `0.0`, so the navigation pipeline preserves the
 raw LiDAR stamp. Override `lidar_timestamp_offset_sec` only after measuring the
 relative LiDAR-to-TF timing. This does not modify the raw driver topic or
 FAST-LIO. A wrong fixed offset creates a pose error whenever the robot moves.
+
+
+The velocity bridge publishes `geometry_msgs/TwistStamped` on
+`/navigation/final_command` (startup parameter `final_command_topic`) at its
+output rate after successful ZMQ submission. It reports the exact clamped,
+watchdog-adjusted command, including timeout-generated zeros. Failed sends,
+including `EAGAIN`, do not publish telemetry. This is command submission, not
+an acknowledgment of robot execution. Localization may use fresh zero-command
+telemetry together with quiet IMU data to qualify stationary automatic recovery;
+this telemetry does not itself stop navigation or prove standstill.

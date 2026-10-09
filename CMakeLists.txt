@@ -190,6 +190,13 @@ if(BUILD_TESTING)
   add_launch_test(test/test_recovery_frames.launch.py TIMEOUT 45)
   add_launch_test(test/test_velocity_smoother.launch.py TIMEOUT 60)
   add_launch_test(test/test_nav2_zmq_velocity_bridge.launch.py TIMEOUT 30)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(test_zmq_send_failure SHARED test/zmq_send_failure.cpp)
+    target_compile_features(test_zmq_send_failure PRIVATE cxx_std_17)
+    target_compile_options(test_zmq_send_failure PRIVATE -Wall -Wextra -Wpedantic)
+    add_launch_test(test/test_velocity_send_failure.launch.py TIMEOUT 30
+      ARGS "send_failure_library:=$<TARGET_FILE:test_zmq_send_failure>")
+  endif()
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)
