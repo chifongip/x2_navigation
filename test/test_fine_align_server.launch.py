@@ -1,5 +1,7 @@
 import time
 import unittest
+
+import yaml
 from math import cos, sin
 from pathlib import Path
 
@@ -20,6 +22,11 @@ from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from tf2_ros import TransformBroadcaster
 from x2_navigation.action import FineAlign, Undock
+
+
+DEFAULT_STANDOFF = yaml.safe_load(
+    (Path(__file__).parents[1] / "config" / "nav2_params.yaml").read_text()
+)["fine_align_server"]["ros__parameters"]["standoff"]
 
 
 def generate_test_description():
@@ -179,8 +186,12 @@ class TestFineAlignServer(unittest.TestCase):
         if self.simulate_motion and self.commands:
             command = self.commands[-1]
             dt = input_time - self.last_input_time
-            self.tag_x -= command.linear.x * dt
-            self.tag_y -= command.linear.y * dt
+            # Integrate body-frame translation and yaw into the fake tag pose.
+            self.tag_x -= (cos(self.robot_yaw) * command.linear.x
+                           - sin(self.robot_yaw) * command.linear.y) * dt
+            self.tag_y -= (sin(self.robot_yaw) * command.linear.x
+                           + cos(self.robot_yaw) * command.linear.y) * dt
+            self.robot_yaw += command.angular.z * dt
             self.odom_linear_velocity = (
                 command.linear.x ** 2 + command.linear.y ** 2
             ) ** 0.5
@@ -338,7 +349,8 @@ class TestFineAlignServer(unittest.TestCase):
         self.assertTrue(offset.success, offset.message)
         self.assertEqual(default.profile_id, "default")
         self.assertEqual(offset.profile_id, "offset")
-        self.assertAlmostEqual(default.final_error.x - offset.final_error.x, 0.2, places=5)
+        self.assertAlmostEqual(default.final_error.x - offset.final_error.x,
+                               0.7 - DEFAULT_STANDOFF, places=5)
         self.assertAlmostEqual(offset.final_error.y - default.final_error.y, -0.1, places=5)
         self.assertAlmostEqual(offset.final_error.theta - default.final_error.theta, 0.1, places=5)
         self.assertTrue(feedback)
@@ -838,7 +850,7 @@ class TestFineAlignServer(unittest.TestCase):
         self.assertTrue(self.spin_with_inputs_until(result.done))
         outcome = result.result().result
         self.assertTrue(outcome.success, outcome.message)
-        self.assertAlmostEqual(outcome.final_error.x, 0.6, delta=0.02)
+        self.assertAlmostEqual(outcome.final_error.x, self.tag_x - DEFAULT_STANDOFF, delta=0.02)
         self.assertAlmostEqual(outcome.final_error.y, 0.2, delta=0.02)
 
     def test_docking_settles_without_odometry(self):
@@ -911,7 +923,7 @@ class TestFineAlignServer(unittest.TestCase):
 
     def test_error_between_old_restart_and_completion_thresholds_moves_and_finishes(self):
         # Fixture tolerance is 0.08 m: the previous restart threshold was 0.10 m.
-        self.tag_x = 0.59
+        self.tag_x = DEFAULT_STANDOFF + 0.09
         self.tag_y = 0.0
         self.warm_up_inputs()
         goal = FineAlign.Goal()
@@ -923,7 +935,7 @@ class TestFineAlignServer(unittest.TestCase):
         self.assertTrue(self.spin_with_inputs_until(
             lambda: any(command.linear.x > 0.0 for command in self.commands)
         ))
-        self.tag_x = 0.55
+        self.tag_x = DEFAULT_STANDOFF + 0.05
         result = handle.get_result_async()
         self.assertTrue(self.spin_with_inputs_until(result.done))
         self.assertTrue(result.result().result.success, result.result().result.message)
@@ -941,7 +953,7 @@ class TestFineAlignServer(unittest.TestCase):
         result = sent.result().get_result_async()
         self.assertTrue(self.spin_with_inputs_until(result.done, timeout=8.0))
         self.assertTrue(result.result().result.success, result.result().result.message)
-        self.assertLessEqual(abs(self.tag_x - 0.5), 0.085)
+        self.assertLessEqual(abs(self.tag_x - DEFAULT_STANDOFF), 0.085)
         self.assertLessEqual(abs(self.tag_y), 0.085)
         moving = [command for command in self.commands if command.linear.x or command.linear.y]
         self.assertTrue(moving)

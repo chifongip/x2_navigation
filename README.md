@@ -59,6 +59,38 @@ it should take priority. This package does not modify RoboJuDo configuration.
 Only one process may bind port 8558. Do not use the X2 upper-body command port
 8559 for navigation.
 
+## Timed in-place rotation
+
+`fine_align_server` exposes `/rotate_in_place` (`x2_navigation/action/RotateInPlace`)
+for open-loop rotation independent of Nav2 execution, AprilTags, and odometry.
+Positive `angular_speed` turns counterclockwise about `base_link` Z; negative turns
+clockwise. `duration` is in seconds and uses a steady clock. Nominal angle is
+speed × duration, an approximation rather than measured rotation. Completion
+means the timed command finished. Commands update at the controller period, so
+the stop deadline has one controller tick of scheduling granularity.
+
+```bash
+# Physical motion: validate the launch and command chain with fake feedback first.
+ros2 action send_goal /rotate_in_place x2_navigation/action/RotateInPlace \
+  "{angular_speed: 0.2, duration: 2.0}" --feedback
+```
+
+Read-only parameters `rotate_max_angular_speed` (default 0.5 rad/s) and
+`rotate_max_duration` (default 60 s) bound requests. Non-finite values, zero speed,
+non-positive duration, or values above limits abort with `INVALID_GOAL`, without
+clamping. Feedback reports elapsed time, commanded speed, and progress; results
+report success, error code, message, and elapsed time. Concurrent fine-align,
+undock, or rotation goals are rejected. Rotation requires manipulation state
+`EMPTY` or `HOLDING` and idle Nav2. A Nav2 process need not be running.
+Cancellation, Collision Monitor STOP, invalid manipulation state, Nav2 activation,
+or shutdown stops rotation. Collision stops abort immediately rather than pause
+or extend the requested duration.
+
+Rotation uses the same `/cmd_vel_raw` → Collision Monitor → `/cmd_vel` → ZMQ
+path as timed undocking, bypassing Nav2 and its velocity smoother. Start shared
+state only once and retain Collision Monitor and the bridge deadman in the full
+launch. Rebuild and restart the server and panel to load the new action interface.
+
 ## AprilTag table fine alignment
 
 Fine alignment is a separate operation after coarse `NavigateToPose` completes.

@@ -135,6 +135,9 @@ velocity_smoother:
 
 fine_align_server:
   ros__parameters:
+    # Open-loop rotation limits (rad/s and seconds); angles are approximate.
+    rotate_max_angular_speed: 0.5
+    rotate_max_duration: 60.0
     use_sim_time: false
     # Legacy settings retained for compatibility; unused by the tag-only server.
     fixed_frame: odom

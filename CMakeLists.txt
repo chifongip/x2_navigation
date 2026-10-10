@@ -26,6 +26,7 @@ find_package(tf2_ros REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/FineAlign.action"
   "action/Undock.action"
+  "action/RotateInPlace.action"
   DEPENDENCIES geometry_msgs
 )
 
@@ -185,6 +186,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_docking_profile_configuration test/test_docking_profile_configuration.py)
   ament_add_pytest_test(test_navigation_config test/test_navigation_config.py)
   add_launch_test(test/test_fine_align_server.launch.py TIMEOUT 120)
+  add_launch_test(test/test_rotate_in_place.launch.py TIMEOUT 60)
   add_launch_test(test/test_fast_lio_odom_adapter.launch.py TIMEOUT 30)
   add_launch_test(test/test_navigation.launch.py TIMEOUT 30)
   add_launch_test(test/test_recovery_frames.launch.py TIMEOUT 45)

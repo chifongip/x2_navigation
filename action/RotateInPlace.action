@@ -1,0 +1,19 @@
+# Open-loop timed rotation. Positive speed is counterclockwise about base_link Z.
+float64 angular_speed
+float64 duration
+---
+uint16 SUCCESS=0
+uint16 INVALID_GOAL=1
+uint16 INVALID_STATE=2
+uint16 NAVIGATION_ACTIVE=3
+uint16 COLLISION_STOPPED=4
+uint16 CANCELED=5
+uint16 SAFETY_ABORT=6
+bool success
+uint16 error_code
+string message
+float64 elapsed_time
+---
+float64 elapsed_time
+float64 commanded_speed
+float32 progress

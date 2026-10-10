@@ -36,6 +36,7 @@
 #include <tf2_ros/transform_listener.h>
 #include <x2_navigation/action/fine_align.hpp>
 #include <x2_navigation/action/undock.hpp>
+#include <x2_navigation/action/rotate_in_place.hpp>
 
 namespace x2_navigation
 {
@@ -50,12 +51,22 @@ public:
   using Undock = x2_navigation::action::Undock;
   using UndockGoalHandle = rclcpp_action::ServerGoalHandle<Undock>;
 
+  using Rotate = x2_navigation::action::RotateInPlace;
+  using RotateGoalHandle = rclcpp_action::ServerGoalHandle<Rotate>;
+
   FineAlignServer()
   : Node("fine_align_server"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
   {
     base_frame_ = declare_parameter("base_frame", "base_link");
     rcl_interfaces::msg::ParameterDescriptor profile_descriptor;
     profile_descriptor.read_only = true;
+    rotate_max_angular_speed_ = declare_parameter("rotate_max_angular_speed", 0.5, profile_descriptor);
+    rotate_max_duration_ = declare_parameter("rotate_max_duration", 60.0, profile_descriptor);
+    if (!std::isfinite(rotate_max_angular_speed_) || rotate_max_angular_speed_ <= 0.0 ||
+      !std::isfinite(rotate_max_duration_) || rotate_max_duration_ <= 0.0)
+    {
+      throw std::invalid_argument("rotation limits must be finite and positive");
+    }
     const auto tag_frame = declare_parameter("tag_frame", "tag9", profile_descriptor);
     const auto tag_id = declare_parameter("tag_id", 9, profile_descriptor);
     minimum_decision_margin_ = declare_parameter("minimum_decision_margin", 20.0);
@@ -314,6 +325,18 @@ public:
       [](std::shared_ptr<UndockGoalHandle>) {return rclcpp_action::CancelResponse::ACCEPT;},
       [this](std::shared_ptr<UndockGoalHandle> handle) {
         std::thread(&FineAlignServer::executeUndock, this, std::move(handle)).detach();
+      });
+    rotate_server_ = rclcpp_action::create_server<Rotate>(
+      this, "/rotate_in_place",
+      [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const Rotate::Goal>) {
+        bool expected = false;
+        return operation_active_.compare_exchange_strong(expected, true) ?
+               rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
+               rclcpp_action::GoalResponse::REJECT;
+      },
+      [](std::shared_ptr<RotateGoalHandle>) {return rclcpp_action::CancelResponse::ACCEPT;},
+      [this](std::shared_ptr<RotateGoalHandle> handle) {
+        std::thread(&FineAlignServer::executeRotate, this, std::move(handle)).detach();
       });
   }
 
@@ -858,6 +881,80 @@ private:
     }
   }
 
+  void executeRotate(const std::shared_ptr<RotateGoalHandle> handle)
+  {
+    const auto goal = handle->get_goal();
+    auto result = std::make_shared<Rotate::Result>();
+    const auto finish = [this, &handle, &result](uint16_t code, const std::string & message) {
+        stopAlignment();
+        result->error_code = code;
+        result->message = message;
+        result->success = code == Rotate::Result::SUCCESS;
+        if (code == Rotate::Result::CANCELED) {
+          handle->canceled(result);
+        } else if (result->success) {
+          handle->succeed(result);
+        } else {
+          RCLCPP_WARN(get_logger(), "Timed rotation aborted: %s", message.c_str());
+          handle->abort(result);
+        }
+        operation_active_.store(false);
+      };
+    if (!std::isfinite(goal->angular_speed) || goal->angular_speed == 0.0 ||
+      std::abs(goal->angular_speed) > rotate_max_angular_speed_ ||
+      !std::isfinite(goal->duration) || goal->duration <= 0.0 ||
+      goal->duration > rotate_max_duration_)
+    {
+      finish(Rotate::Result::INVALID_GOAL, "speed or duration is invalid or exceeds rotation limits");
+      return;
+    }
+    std::optional<std::chrono::steady_clock::time_point> start;
+    while (rclcpp::ok()) {
+      const auto now = std::chrono::steady_clock::now();
+      result->elapsed_time = start ? std::chrono::duration<double>(now - *start).count() : 0.0;
+      bool collision_stopped;
+      {
+        std::lock_guard<std::mutex> lock(collision_mutex_);
+        collision_stopped = collision_stopped_;
+      }
+      if (handle->is_canceling()) {
+        finish(Rotate::Result::CANCELED, "timed rotation canceled");
+        return;
+      }
+      if (nav_active_.load()) {
+        finish(Rotate::Result::NAVIGATION_ACTIVE, "Nav2 is active");
+        return;
+      }
+      if (!validState(currentManipulationState())) {
+        finish(Rotate::Result::INVALID_STATE, "rotation requires manipulation state EMPTY or HOLDING");
+        return;
+      }
+      if (collision_stopped) {
+        finish(Rotate::Result::COLLISION_STOPPED, "collision monitor stopped rotation");
+        return;
+      }
+      if (start && result->elapsed_time >= goal->duration) {
+        finish(Rotate::Result::SUCCESS, "timed rotation completed; actual angle is not measured");
+        return;
+      }
+      {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        alignment_command_ = geometry_msgs::msg::Twist{};
+        alignment_command_.angular.z = goal->angular_speed;
+        alignment_command_time_ = now;
+        if (!start) {start = now;}
+        alignment_active_.store(true);
+      }
+      auto feedback = std::make_shared<Rotate::Feedback>();
+      feedback->elapsed_time = result->elapsed_time;
+      feedback->commanded_speed = goal->angular_speed;
+      feedback->progress = static_cast<float>(result->elapsed_time / goal->duration);
+      handle->publish_feedback(feedback);
+      std::this_thread::sleep_for(controller_period_);
+    }
+    finish(Rotate::Result::SAFETY_ABORT, "ROS shutdown interrupted timed rotation");
+  }
+
   uint8_t currentManipulationState() const
   {
     std::lock_guard<std::mutex> lock(measurement_mutex_);
@@ -1298,6 +1395,8 @@ private:
 
   rclcpp_action::Server<FineAlign>::SharedPtr server_;
   rclcpp_action::Server<Undock>::SharedPtr undock_server_;
+  rclcpp_action::Server<Rotate>::SharedPtr rotate_server_;
+  double rotate_max_angular_speed_, rotate_max_duration_;
   std::vector<rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr>
     detections_subs_;
   rclcpp::Subscription<agibot_x2_manipulation_msgs::msg::ManipulationState>::SharedPtr state_sub_;
