@@ -6,7 +6,7 @@ import launch
 import launch_testing.actions
 import rclpy
 import zmq
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from launch_ros.actions import Node
 
 
@@ -42,6 +42,10 @@ class TestNav2ZmqVelocityBridge(unittest.TestCase):
     def setUp(self):
         self.node = rclpy.create_node("test_nav2_zmq_velocity_bridge")
         self.publisher = self.node.create_publisher(Twist, "/cmd_vel", 10)
+        self.final_commands = []
+        self.final_subscription = self.node.create_subscription(
+            TwistStamped, "/navigation/final_command", self.final_commands.append, 10
+        )
         self.context = zmq.Context()
         self.subscriber = self.context.socket(zmq.SUB)
         self.subscriber.setsockopt(zmq.LINGER, 0)
@@ -58,7 +62,8 @@ class TestNav2ZmqVelocityBridge(unittest.TestCase):
     def receive_until(self, predicate, timeout=3.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            events = dict(self.poller.poll(timeout=100))
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+            events = dict(self.poller.poll(timeout=50))
             if self.subscriber not in events:
                 continue
             message = json.loads(self.subscriber.recv().decode("utf-8"))
@@ -93,6 +98,14 @@ class TestNav2ZmqVelocityBridge(unittest.TestCase):
             self.publisher.publish(command)
             received = self.receive_until(lambda message: message == expected, timeout=0.25)
         self.assertEqual(received, expected)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not any(
+            m.twist.linear.x == 1.0 and m.twist.linear.y == 1.0
+            and m.twist.angular.z == -1.0 for m in self.final_commands
+        ):
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+        self.assertTrue(any(m.twist.linear.x == 1.0 and m.twist.linear.y == 1.0
+                            and m.twist.angular.z == -1.0 for m in self.final_commands))
 
         command.linear.x = -2.0
         command.linear.y = -2.0
@@ -114,3 +127,27 @@ class TestNav2ZmqVelocityBridge(unittest.TestCase):
             "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
         }
         self.assertEqual(self.receive_until(lambda message: message == zero, timeout=1.0), zero)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+        self.assertEqual(self.final_commands[-1].twist, Twist())
+        stamps = [m.header.stamp.sec * 10**9 + m.header.stamp.nanosec
+                  for m in self.final_commands]
+        self.assertTrue(all(b > a for a, b in zip(stamps, stamps[1:])))
+
+        # Invalid upstream commands clear the actual output and its telemetry.
+        deadline = time.monotonic() + 2.0
+        received = None
+        while time.monotonic() < deadline and received is None:
+            self.publisher.publish(command)
+            received = self.receive_until(lambda m: m == reverse_expected, timeout=0.1)
+        self.assertEqual(received, reverse_expected)
+        self.final_commands.clear()
+        invalid = Twist()
+        invalid.linear.x = float("nan")
+        self.publisher.publish(invalid)
+        self.assertEqual(self.receive_until(lambda message: message == zero, timeout=0.15), zero)
+        deadline = time.monotonic() + 0.15
+        while time.monotonic() < deadline and not any(m.twist == Twist() for m in self.final_commands):
+            rclpy.spin_once(self.node, timeout_sec=0.005)
+        self.assertTrue(any(m.twist == Twist() for m in self.final_commands))

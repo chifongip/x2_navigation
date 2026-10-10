@@ -7,6 +7,7 @@
 #include <string>
 
 #include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <zmq.h>
 
@@ -63,7 +64,7 @@ public:
   {
     const auto payload = velocityCommandJson(command);
     const auto result = zmq_send(socket_, payload.data(), payload.size(), ZMQ_DONTWAIT);
-    return result >= 0 || errno == EAGAIN;
+    return result >= 0;
   }
 
 private:
@@ -114,6 +115,16 @@ public:
       throw std::invalid_argument("command_timeout_sec must be finite and positive");
     }
 
+    rcl_interfaces::msg::ParameterDescriptor final_descriptor;
+    final_descriptor.read_only = true;
+    final_descriptor.description = "Startup-only topic for submitted final velocity commands";
+    const auto final_topic = declare_parameter<std::string>(
+      "final_command_topic", "/navigation/final_command", final_descriptor);
+    if (final_topic.empty()) {
+      throw std::invalid_argument("final_command_topic must not be empty");
+    }
+    final_command_publisher_ = create_publisher<geometry_msgs::msg::TwistStamped>(
+      final_topic, rclcpp::QoS(10));
     publisher_ = std::make_unique<ZmqVelocityPublisher>(endpoint);
     command_timeout_ = std::chrono::duration<double>(command_timeout_sec);
     command_subscription_ = create_subscription<geometry_msgs::msg::Twist>(
@@ -153,9 +164,21 @@ private:
     if (!publisher_->publish(command)) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 1000, "ZMQ velocity send failed: %s", zmq_strerror(errno));
+      return;
     }
+    geometry_msgs::msg::TwistStamped output;
+    output.header.stamp = now();
+    output.header.frame_id = "base_link";
+    output.twist.linear.x = command.linear_x;
+    output.twist.linear.y = command.linear_y;
+    output.twist.linear.z = command.linear_z;
+    output.twist.angular.x = command.angular_x;
+    output.twist.angular.y = command.angular_y;
+    output.twist.angular.z = command.angular_z;
+    final_command_publisher_->publish(output);
   }
 
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr final_command_publisher_;
   std::unique_ptr<ZmqVelocityPublisher> publisher_;
   VelocityCommandWatchdog watchdog_;
   std::chrono::duration<double> command_timeout_{0.20};
