@@ -256,20 +256,30 @@ public:
         std::lock_guard<std::mutex> lock(measurement_mutex_);
         manipulation_state_ = message->state;
       });
-    nav_status_sub_ = create_subscription<action_msgs::msg::GoalStatusArray>(
-      "/navigate_to_pose/_action/status", 10,
-      [this](action_msgs::msg::GoalStatusArray::SharedPtr message) {
-        bool active = false;
-        for (const auto & status : message->status_list) {
-          active = active || status.status == action_msgs::msg::GoalStatus::STATUS_ACCEPTED ||
-            status.status == action_msgs::msg::GoalStatus::STATUS_EXECUTING ||
-            status.status == action_msgs::msg::GoalStatus::STATUS_CANCELING;
-        }
-        nav_active_.store(active);
-      });
+    const std::vector<std::string> nav_status_topics{
+      "/navigate_to_pose/_action/status", "/navigate_through_poses/_action/status"};
+    for (std::size_t index = 0; index < nav_status_topics.size(); ++index) {
+      const auto mask = 1U << index;
+      nav_status_subs_.push_back(create_subscription<action_msgs::msg::GoalStatusArray>(
+        nav_status_topics[index], rclcpp::QoS(1).reliable().transient_local(),
+        [this, mask](action_msgs::msg::GoalStatusArray::SharedPtr message) {
+          const bool active = std::any_of(
+            message->status_list.begin(), message->status_list.end(), [](const auto & status) {
+              return status.status == action_msgs::msg::GoalStatus::STATUS_ACCEPTED ||
+                     status.status == action_msgs::msg::GoalStatus::STATUS_EXECUTING ||
+                     status.status == action_msgs::msg::GoalStatus::STATUS_CANCELING;
+            });
+          if (active) {
+            nav_active_mask_.fetch_or(mask);
+          } else {
+            nav_active_mask_.fetch_and(~mask);
+          }
+        }));
+    }
     nav_cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
-      nav_cmd_topic, 10, [this](geometry_msgs::msg::Twist::SharedPtr message) {
+      nav_cmd_topic, rclcpp::QoS(1), [this](geometry_msgs::msg::Twist::SharedPtr message) {
         std::lock_guard<std::mutex> lock(command_mutex_);
+        if (operation_active_.load()) {return;}
         nav_command_gate_.update(
           *message, std::chrono::steady_clock::now(),
           std::chrono::duration<double>(command_timeout_));
@@ -279,25 +289,34 @@ public:
         nav_raw_cmd_topic, rclcpp::QoS(1),
         [this](geometry_msgs::msg::Twist::SharedPtr message) {
           std::lock_guard<std::mutex> lock(command_mutex_);
+          if (operation_active_.load()) {return;}
           nav_command_gate_.updateRaw(
             *message, std::chrono::steady_clock::now(),
             std::chrono::duration<double>(command_timeout_));
         });
     }
-    collision_sub_ = create_subscription<nav2_msgs::msg::CollisionMonitorState>(
-      "/collision_monitor_state", 10,
-      [this](nav2_msgs::msg::CollisionMonitorState::SharedPtr message) {
-        std::lock_guard<std::mutex> lock(collision_mutex_);
-        if (message->action_type == nav2_msgs::msg::CollisionMonitorState::STOP) {
-          if (!collision_stopped_) {
-            collision_stop_since_ = std::chrono::steady_clock::now();
+    const auto bypass_collision_monitor = declare_parameter(
+      "bypass_collision_monitor", false, profile_descriptor);
+    if (bypass_collision_monitor) {
+      RCLCPP_WARN(get_logger(),
+        "Direct alignment enabled: fine-align, undock, and rotation bypass Collision Monitor. "
+        "Navigation must be canceled before starting a local action.");
+    } else {
+      collision_sub_ = create_subscription<nav2_msgs::msg::CollisionMonitorState>(
+        "/collision_monitor_state", 10,
+        [this](nav2_msgs::msg::CollisionMonitorState::SharedPtr message) {
+          std::lock_guard<std::mutex> lock(collision_mutex_);
+          if (message->action_type == nav2_msgs::msg::CollisionMonitorState::STOP) {
+            if (!collision_stopped_) {
+              collision_stop_since_ = std::chrono::steady_clock::now();
+            }
+            collision_stopped_ = true;
+          } else {
+            collision_stopped_ = false;
+            collision_stop_since_.reset();
           }
-          collision_stopped_ = true;
-        } else {
-          collision_stopped_ = false;
-          collision_stop_since_.reset();
-        }
-      });
+        });
+    }
 
     raw_cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>(raw_cmd_topic, 10);
     mux_timer_ = create_wall_timer(
@@ -553,7 +572,7 @@ private:
     const auto deadline = std::chrono::steady_clock::now() +
       std::chrono::duration<double>(acquisition_timeout_);
     while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
-      if (handle->is_canceling() || nav_active_.load()) {
+      if (handle->is_canceling() || navigationActive()) {
         return false;
       }
       const bool target_available = stableMeasurement(target, state, sequence);
@@ -626,7 +645,7 @@ private:
     const auto deadline = std::chrono::steady_clock::now() +
       std::chrono::duration<double>(retry_delay_);
     while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
-      if (handle->is_canceling() || nav_active_.load()) {
+      if (handle->is_canceling() || navigationActive()) {
         return false;
       }
       std::this_thread::sleep_for(100ms);
@@ -648,7 +667,7 @@ private:
       if (handle->is_canceling()) {
         return AttemptFailure{FineAlign::Result::ALIGNMENT_TIMEOUT, "fine alignment canceled"};
       }
-      if (nav_active_.load()) {
+      if (navigationActive()) {
         return AttemptFailure{FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 became active"};
       }
       if (!rclcpp::ok()) {
@@ -696,7 +715,7 @@ private:
       if (handle->is_canceling()) {
         return AttemptFailure{FineAlign::Result::ALIGNMENT_TIMEOUT, "fine alignment canceled"};
       }
-      if (nav_active_.load()) {
+      if (navigationActive()) {
         return AttemptFailure{FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 became active"};
       }
       if (collisionStopTimedOut()) {
@@ -809,7 +828,7 @@ private:
         "invalid docking profile or box instance: " + handle->get_goal()->profile_id);
       return;
     }
-    if (nav_active_.load()) {
+    if (navigationActive()) {
       finish(handle, result, FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 is active");
       return;
     }
@@ -821,7 +840,7 @@ private:
     std::uint64_t minimum_sequence = 0;
     for (std::size_t attempt = 1; attempt <= maximum_attempts; ++attempt) {
       if (attempt > 1U && !waitForRetryDelay(handle, *result)) {
-        if (nav_active_.load()) {
+        if (navigationActive()) {
           finish(handle, result, FineAlign::Result::NAVIGATION_ACTIVE, "Nav2 became active");
         } else {
           finishCanceledOrFailed(
@@ -921,7 +940,7 @@ private:
         finish(Rotate::Result::CANCELED, "timed rotation canceled");
         return;
       }
-      if (nav_active_.load()) {
+      if (navigationActive()) {
         finish(Rotate::Result::NAVIGATION_ACTIVE, "Nav2 is active");
         return;
       }
@@ -988,7 +1007,7 @@ private:
       "collision_stopped=%s (age=%.3f s)",
       static_cast<unsigned int>(code), message.c_str(), result.undock_mode.c_str(),
       result.elapsed_time, result.distance_traveled, target_distance, static_cast<unsigned int>(result.manipulation_state),
-      static_cast<unsigned int>(currentManipulationState()), nav_active_.load() ? "true" : "false",
+      static_cast<unsigned int>(currentManipulationState()), navigationActive() ? "true" : "false",
       collision_stopped ? "true" : "false", collision_stop_age);
   }
 
@@ -1032,12 +1051,12 @@ private:
         std::lock_guard<std::mutex> lock(collision_mutex_);
         collision_stopped = collision_stopped_;
       }
-      if (handle->is_canceling() || nav_active_.load() || collision_stopped ||
+      if (handle->is_canceling() || navigationActive() || collision_stopped ||
         !validState(result->manipulation_state))
       {
         finishUndock(handle, result,
           handle->is_canceling() ? Undock::Result::CANCELED :
-          nav_active_.load() ? Undock::Result::NAVIGATION_ACTIVE :
+          navigationActive() ? Undock::Result::NAVIGATION_ACTIVE :
           collision_stopped ? Undock::Result::COLLISION_STOPPED : Undock::Result::INVALID_STATE,
           "timed undocking interrupted by cancellation, navigation, collision stop, or state");
         return;
@@ -1110,7 +1129,7 @@ private:
       profile.timed_reverse_speed * profile.timed_reverse_duration : undock_distance_;
     handle->publish_feedback(validating);
 
-    if (nav_active_.load()) {
+    if (navigationActive()) {
       finishUndock(handle, result, Undock::Result::NAVIGATION_ACTIVE, "Nav2 is active");
       return;
     }
@@ -1131,12 +1150,12 @@ private:
     const auto acquisition_deadline = std::chrono::steady_clock::now() +
       std::chrono::duration<double>(acquisition_timeout_);
     while (rclcpp::ok() && !stableMeasurement(initial, state, sequence)) {
-      if (handle->is_canceling() || nav_active_.load() || collisionStopTimedOut() ||
+      if (handle->is_canceling() || navigationActive() || collisionStopTimedOut() ||
         !validState(currentManipulationState()))
       {
         finishUndock(handle, result,
           handle->is_canceling() ? Undock::Result::CANCELED :
-          nav_active_.load() ? Undock::Result::NAVIGATION_ACTIVE :
+          navigationActive() ? Undock::Result::NAVIGATION_ACTIVE :
           !validState(currentManipulationState()) ? Undock::Result::INVALID_STATE :
           Undock::Result::COLLISION_STOPPED, "undock acquisition interrupted");
         return;
@@ -1163,10 +1182,10 @@ private:
     auto next_progress_log = std::chrono::steady_clock::time_point::min();
     std::uint64_t checked_sequence = 0;
     while (rclcpp::ok()) {
-      if (handle->is_canceling() || nav_active_.load() || collisionStopTimedOut()) {
+      if (handle->is_canceling() || navigationActive() || collisionStopTimedOut()) {
         finishUndock(handle, result,
           handle->is_canceling() ? Undock::Result::CANCELED :
-          nav_active_.load() ? Undock::Result::NAVIGATION_ACTIVE : Undock::Result::COLLISION_STOPPED,
+          navigationActive() ? Undock::Result::NAVIGATION_ACTIVE : Undock::Result::COLLISION_STOPPED,
           "undocking interrupted by cancellation, navigation, or collision stop");
         return;
       }
@@ -1271,6 +1290,7 @@ private:
       std::lock_guard<std::mutex> lock(command_mutex_);
       alignment_command_ = geometry_msgs::msg::Twist{};
       alignment_command_time_.reset();
+      nav_command_gate_.reset();
     }
     raw_cmd_pub_->publish(geometry_msgs::msg::Twist{});
   }
@@ -1331,7 +1351,7 @@ private:
       stable_target_available ? "available" : "unavailable",
       static_cast<unsigned long long>(stable_target_sequence), stable_target_x, stable_target_y,
       stable_target_yaw, stable_target_age, base_frame_.c_str(),
-      nav_active_.load() ? "true" : "false", collision_stopped ? "true" : "false",
+      navigationActive() ? "true" : "false", collision_stopped ? "true" : "false",
       collision_stop_age);
   }
 
@@ -1372,7 +1392,7 @@ private:
     const auto now_steady = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(command_mutex_);
     if (operation_active_.load()) {
-      if (!nav_active_.load() && alignment_active_.load() && alignment_command_time_ &&
+      if (!navigationActive() && alignment_active_.load() && alignment_command_time_ &&
         std::chrono::duration<double>(now_steady - *alignment_command_time_).count() <=
         command_timeout_)
       {
@@ -1383,6 +1403,11 @@ private:
         now_steady, std::chrono::duration<double>(command_timeout_));
     }
     raw_cmd_pub_->publish(command);
+  }
+
+  bool navigationActive() const
+  {
+    return nav_active_mask_.load() != 0U;
   }
 
   bool collisionStopTimedOut()
@@ -1400,7 +1425,7 @@ private:
   std::vector<rclcpp::Subscription<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr>
     detections_subs_;
   rclcpp::Subscription<agibot_x2_manipulation_msgs::msg::ManipulationState>::SharedPtr state_sub_;
-  rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr nav_status_sub_;
+  std::vector<rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr> nav_status_subs_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_cmd_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_raw_cmd_sub_;
   NavigationCommandGate nav_command_gate_;
@@ -1425,7 +1450,8 @@ private:
   geometry_msgs::msg::Twist alignment_command_;
   std::optional<std::chrono::steady_clock::time_point> alignment_command_time_;
   std::optional<std::chrono::steady_clock::time_point> collision_stop_since_;
-  std::atomic_bool operation_active_{false}, alignment_active_{false}, nav_active_{false};
+  std::atomic_bool operation_active_{false}, alignment_active_{false};
+  std::atomic_uint nav_active_mask_{0U};
   bool collision_stopped_{false};
   std::string base_frame_, default_profile_, last_docked_profile_;
   std::string active_instance_id_, last_docked_instance_;

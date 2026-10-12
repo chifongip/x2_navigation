@@ -154,7 +154,7 @@ def test_navigation_velocity_smoothing_configuration_and_wiring():
     assert 'default_value="/cmd_vel_nav_smoothed"' in source
     assert '("cmd_vel", nav_cmd_topic)' in source
     assert '("cmd_vel_smoothed", smoothed_nav_cmd_topic)' in source
-    assert '"nav_cmd_topic": smoothed_nav_cmd_topic' in source
+    assert '"nav_cmd_topic": arbitration_input' in source
     assert '"nav_raw_cmd_topic": nav_cmd_topic' in source
     lifecycle_nodes = source.split("lifecycle_nodes = [", 1)[1].split("]", 1)[0]
     assert lifecycle_nodes.index('"velocity_smoother"') < lifecycle_nodes.index(
@@ -463,8 +463,8 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     assert '"raw_cmd_topic"' in launch_source
     assert 'default_value="/cmd_vel_raw"' in launch_source
     assert launch_source.count('remappings=[("cmd_vel", nav_cmd_topic)]') == 2
-    assert '"cmd_vel_in_topic": raw_cmd_topic' in launch_source
-    assert '"cmd_vel_out_topic": velocity_topic' in launch_source
+    assert '"cmd_vel_in_topic": collision_input' in launch_source
+    assert '"cmd_vel_out_topic": collision_output' in launch_source
     assert 'executable="fine_align_server"' in launch_source
     assert 'executable="collision_monitor"' in launch_source
 
