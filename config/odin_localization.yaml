@@ -1,0 +1,31 @@
+odin_localization_adapter:
+  ros__parameters:
+    input_topic: /odin1/odometry_highfreq
+    native_tf_topic: /odin1/tf
+    native_odom_frame: odom
+    native_map_frame: map
+    native_imu_frame: imu
+    tracking_frame: odin_imu
+    base_frame: base_link
+    odom_frame: odom
+    map_frame: map
+    # Same correction for local odometry and native map corrections. Measure
+    # clock offset independently; packet arrival latency is not clock offset.
+    sensor_time_offset_sec: 0.0
+    local_timeout_sec: 0.25
+    correction_timeout_sec: 1.0
+    future_tolerance_sec: 0.05
+    # Bound storage while waiting for delayed articulated robot TF. Samples
+    # older than local_timeout_sec are discarded independently of this limit.
+    max_pending_samples: 256
+    max_translation_step_m: 0.5
+    max_rotation_step_rad: 0.5
+    # Explicit estimates: native SDK covariance axes are not documented.
+    pose_variance: 0.01
+    twist_variance: 0.1
+    # T_nav_map_odin_map, p_nav = Rz(yaw) Ry(pitch) Rx(roll) p_odin + xyz.
+    map_alignment_xyz: [0.0, 0.0, 0.0]
+    map_alignment_rpy: [0.0, 0.0, 0.0]
+    # Set true in a separate runtime copy only after matching the active .bin
+    # with the PCD export and generated occupancy map. No identity fallback.
+    map_alignment_confirmed: false

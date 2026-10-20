@@ -2,7 +2,11 @@
 
 `x2_navigation` is the X2's minimal Navigation2 stack. It consumes existing
 robot state and localization; it never starts a controller manager, a robot
-state publisher, FAST-LIO, or a global-localization node.
+state publisher, FAST-LIO, or an Odin device driver. The selected adapter
+converts externally supplied localization; the Odin adapter also owns root TF.
+
+For selectable Odin localization, startup and controlled validation, see
+[Odin localization](docs/odin_localization.md). FAST-LIO remains the default.
 
 The included map is `2026-08-18-Lab_voxel_0_05m.yaml` at 0.05 m resolution.
 

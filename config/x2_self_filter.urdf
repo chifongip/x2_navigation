@@ -1014,6 +1014,24 @@
     <child link="rgb_head_center" />
     <axis xyz="0 0 0" />
   </joint>
+  <link name="odin_imu" />
+  <joint name="torso_to_odin_imu" type="fixed">
+    <origin xyz="0.073728756432203724 -0.039674780144805827 0.51915152265257081" rpy="-0.01711252161252139 -0.11609987408780399 0.02954819634020793" />
+    <parent link="torso_link" />
+    <child link="odin_imu" />
+  </joint>
+  <link name="odin_lidar" />
+  <joint name="odin_imu_to_lidar" type="fixed">
+    <origin xyz="-0.02663 0.03447 0.02174" rpy="0 0 0" />
+    <parent link="odin_imu" />
+    <child link="odin_lidar" />
+  </joint>
+  <link name="odin_camera_optical" />
+  <joint name="odin_lidar_to_camera_optical" type="fixed">
+    <origin xyz="0.008456342874872182 0.04052069554278911 -0.004499499740103051" rpy="-1.570305112804365 0.005333335092457248 -1.583465418266997" />
+    <parent link="odin_lidar" />
+    <child link="odin_camera_optical" />
+  </joint>
   <link name="lidar_chest_front">
 
   </link>

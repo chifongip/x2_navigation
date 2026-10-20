@@ -22,6 +22,7 @@ find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/FineAlign.action"
@@ -74,7 +75,16 @@ target_link_libraries(nav2_zmq_velocity_bridge PkgConfig::ZMQ)
 ament_target_dependencies(nav2_zmq_velocity_bridge
   geometry_msgs
   rclcpp
+  std_msgs
 )
+
+add_executable(odin_localization_adapter src/odin_localization_adapter.cpp)
+target_compile_features(odin_localization_adapter PUBLIC cxx_std_17)
+target_compile_options(odin_localization_adapter PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(odin_localization_adapter PRIVATE include)
+target_link_libraries(odin_localization_adapter Eigen3::Eigen)
+ament_target_dependencies(odin_localization_adapter
+  geometry_msgs nav_msgs rclcpp std_msgs tf2 tf2_eigen tf2_msgs tf2_ros)
 
 add_executable(lidar_cloud_throttle src/lidar_cloud_throttle.cpp)
 target_compile_features(lidar_cloud_throttle PUBLIC cxx_std_17)
@@ -108,6 +118,7 @@ ament_target_dependencies(payload_cloud_filter
 )
 
 install(TARGETS
+  odin_localization_adapter
   fast_lio_odom_adapter
   fine_align_server
   nav2_zmq_velocity_bridge
@@ -116,6 +127,7 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY config launch map rviz DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY docs DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 
@@ -123,6 +135,16 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
+
+  ament_add_gtest(test_odin_transform test/test_odin_transform.cpp)
+  target_include_directories(test_odin_transform PRIVATE include)
+  target_link_libraries(test_odin_transform Eigen3::Eigen)
+  ament_target_dependencies(test_odin_transform geometry_msgs)
+  ament_add_pytest_test(test_localization_backend test/test_localization_backend.py)
+  ament_add_pytest_test(test_odin_driver_launch test/test_odin_driver_launch.py)
+  add_launch_test(test/test_odin_localization.launch.py TIMEOUT 90)
+  add_launch_test(test/test_odin_recovery.launch.py TIMEOUT 90)
+  add_launch_test(test/test_odin_navigation.launch.py TIMEOUT 45)
 
   ament_add_gtest(test_point_cloud_obstacle_layer test/test_point_cloud_obstacle_layer.cpp)
   target_compile_options(test_point_cloud_obstacle_layer PRIVATE -Wall -Wextra -Wpedantic)

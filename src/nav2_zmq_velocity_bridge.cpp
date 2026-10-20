@@ -9,9 +9,11 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <zmq.h>
 
 #include "x2_navigation/timing.hpp"
+#include "x2_navigation/localization_gate.hpp"
 #include "x2_navigation/velocity_command.hpp"
 
 namespace x2_navigation
@@ -99,6 +101,24 @@ public:
     const auto endpoint = declare_parameter<std::string>("zmq_endpoint", "tcp://*:8558");
     const auto publish_rate_hz = declare_parameter<double>("publish_rate_hz", 20.0);
     const auto command_timeout_sec = declare_parameter<double>("command_timeout_sec", 0.20);
+    require_localization_ = declare_parameter<bool>("require_localization_ready", false);
+    const auto readiness_topic = declare_parameter<std::string>(
+      "localization_ready_topic", "/odin1/localization_ready");
+    const auto readiness_timeout = declare_parameter<double>("localization_ready_timeout_sec", 0.25);
+    if (readiness_topic.empty() || !std::isfinite(readiness_timeout) || readiness_timeout <= 0.0) {
+      throw std::invalid_argument("Invalid localization readiness topic or timeout");
+    }
+    readiness_timeout_ = std::chrono::duration<double>(readiness_timeout);
+    if (require_localization_) {
+      readiness_sub_ = create_subscription<std_msgs::msg::Bool>(
+        readiness_topic, rclcpp::QoS(1), [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+          const auto stamp = LocalizationGate::Clock::now();
+          if (!gate_.ready(stamp, readiness_timeout_) || !msg->data) {
+            watchdog_ = VelocityCommandWatchdog{};
+          }
+          gate_.update(msg->data, stamp);
+        });
+    }
 
     if (command_topic.empty()) {
       throw std::invalid_argument("command_topic must not be empty");
@@ -150,6 +170,12 @@ public:
 private:
   void commandCallback(const geometry_msgs::msg::Twist::SharedPtr message)
   {
+    if (require_localization_ &&
+      !gate_.ready(LocalizationGate::Clock::now(), readiness_timeout_))
+    {
+      watchdog_ = VelocityCommandWatchdog{};
+      return;
+    }
     if (!watchdog_.update(*message, VelocityCommandWatchdog::Clock::now())) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 1000,
@@ -159,6 +185,11 @@ private:
 
   void publishCommand()
   {
+    if (require_localization_ &&
+      !gate_.ready(LocalizationGate::Clock::now(), readiness_timeout_))
+    {
+      watchdog_ = VelocityCommandWatchdog{};
+    }
     const auto command = watchdog_.commandAt(
       VelocityCommandWatchdog::Clock::now(), command_timeout_);
     if (!publisher_->publish(command)) {
@@ -181,6 +212,10 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr final_command_publisher_;
   std::unique_ptr<ZmqVelocityPublisher> publisher_;
   VelocityCommandWatchdog watchdog_;
+  bool require_localization_{false};
+  LocalizationGate gate_;
+  std::chrono::duration<double> readiness_timeout_{0.25};
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr readiness_sub_;
   std::chrono::duration<double> command_timeout_{0.20};
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr command_subscription_;
   rclcpp::TimerBase::SharedPtr publish_timer_;

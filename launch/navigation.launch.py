@@ -4,7 +4,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
-from launch.substitutions import IfElseSubstitution, LaunchConfiguration
+from launch.substitutions import IfElseSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from nav2_common.launch import RewrittenYaml
@@ -31,6 +31,27 @@ def validate_command_topics(context):
             )
         resolved[full_topic] = name
     return []
+
+
+def backend_actions(context):
+    backend = LaunchConfiguration("localization_backend").perform(context)
+    if backend == "fast_lio":
+        return [Node(
+            package="x2_navigation", executable="fast_lio_odom_adapter",
+            name="fast_lio_odom_adapter", output="screen",
+            parameters=[LaunchConfiguration("params_file"), {
+                "use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool),
+            }],
+        )]
+    if backend != "odin":
+        raise RuntimeError("localization_backend must be fast_lio or odin")
+    return [Node(
+        package="x2_navigation", executable="odin_localization_adapter",
+        name="odin_localization_adapter", output="screen",
+        parameters=[LaunchConfiguration("odin_params_file"), {
+            "use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool),
+        }],
+    )]
 
 
 def generate_launch_description():
@@ -220,22 +241,31 @@ def generate_launch_description():
                 ),
                 description="Behavior-tree XML used by NavigateThroughPoses.",
             ),
-            OpaqueFunction(function=validate_command_topics),
-            Node(
-                package="x2_navigation",
-                executable="fast_lio_odom_adapter",
-                name="fast_lio_odom_adapter",
-                output="screen",
-                parameters=[configured_params],
+            DeclareLaunchArgument(
+                "localization_backend", default_value="fast_lio", choices=["fast_lio", "odin"],
+                description="Select the odometry adapter; localization drivers remain external.",
             ),
+            DeclareLaunchArgument(
+                "odin_params_file", default_value=str(package_path / "config" / "odin_localization.yaml"),
+            ),
+            DeclareLaunchArgument(
+                "enable_velocity_bridge", default_value="true", choices=["true", "false"],
+                description="Disable for passive validation; prevents binding the motion endpoint.",
+            ),
+            OpaqueFunction(function=validate_command_topics),
+            OpaqueFunction(function=backend_actions),
             Node(
                 package="x2_navigation",
                 executable="nav2_zmq_velocity_bridge",
                 name="nav2_zmq_velocity_bridge",
+                condition=IfCondition(LaunchConfiguration("enable_velocity_bridge")),
                 output="screen",
                 parameters=[
                     configured_params,
                     {
+                        "require_localization_ready": ParameterValue(PythonExpression([
+                            "'", LaunchConfiguration("localization_backend"), "' == 'odin'"
+                        ]), value_type=bool),
                         "command_topic": velocity_topic,
                         "zmq_endpoint": velocity_zmq_endpoint,
                         "publish_rate_hz": ParameterValue(

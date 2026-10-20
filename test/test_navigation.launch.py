@@ -19,6 +19,10 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 
 def generate_test_description():
+    return navigation_test_description("fast_lio")
+
+
+def navigation_test_description(localization_backend, root_tf=True, odin_params_file=None):
     package_path = Path(get_package_share_directory("x2_navigation"))
     bringup_path = Path(get_package_share_directory("x2_bringup"))
     static_map_to_odom = Node(
@@ -49,20 +53,22 @@ def generate_test_description():
             {"publish_frequency": 50.0},
         ],
     )
+    launch_arguments = {
+        "localization_backend": localization_backend,
+        "rviz": "false",
+        "lidar_pointcloud_topic": "/test/lidar_pointcloud",
+        "velocity_zmq_endpoint": "tcp://127.0.0.1:18561",
+        "nav_cmd_topic": "/test/navigation/original",
+        "smoothed_nav_cmd_topic": "/test/navigation/smoothed",
+    }
+    if odin_params_file is not None:
+        launch_arguments["odin_params_file"] = odin_params_file
     navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(package_path / "launch" / "navigation.launch.py")),
-        launch_arguments={
-            "rviz": "false",
-            "lidar_pointcloud_topic": "/test/lidar_pointcloud",
-            "velocity_zmq_endpoint": "tcp://127.0.0.1:18561",
-            "nav_cmd_topic": "/test/navigation/original",
-            "smoothed_nav_cmd_topic": "/test/navigation/smoothed",
-        }.items(),
+        launch_arguments=launch_arguments.items(),
     )
     return launch.LaunchDescription(
-        [
-            static_map_to_odom,
-            static_odom_to_base,
+        ([static_map_to_odom, static_odom_to_base] if root_tf else []) + [
             state_publisher,
             navigation,
             launch_testing.actions.ReadyToTest(),

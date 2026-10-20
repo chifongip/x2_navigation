@@ -102,13 +102,13 @@ controller_server:
       trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist] # , PreferForward]
+      critics: [RotateToGoal, Oscillation, BaseObstacle, GoalAlign, PathAlign, PathDist, GoalDist, PreferForward]
       # Prefer forward travel while retaining reverse motion when needed.
-      # PreferForward.scale: 1.0
-      # PreferForward.penalty: 10.0
-      # PreferForward.theta_scale: 1.0
-      # PreferForward.strafe_x: 0.05
-      # PreferForward.strafe_theta: 0.2
+      PreferForward.scale: 1.0
+      PreferForward.penalty: 10.0
+      PreferForward.theta_scale: 1.0
+      PreferForward.strafe_x: 0.05
+      PreferForward.strafe_theta: 0.2
       BaseObstacle.scale: 0.02
       PathAlign.scale: 24.0
       PathAlign.forward_point_distance: 0.15
@@ -146,7 +146,7 @@ fine_align_server:
     # Additional named profiles use docking_profiles.<name> fields.
     # The default profile retains the legacy tag and geometry settings below.
     default_docking_profile: default
-    docking_profile_names: [trolley, small_carton_dock, grey_box_dock]
+    docking_profile_names: [trolley, table, small_carton_dock, grey_box_dock]
     docking_profiles:
       small_carton_dock:
         target_source: box
@@ -160,17 +160,23 @@ fine_align_server:
       grey_box_dock:
         target_source: box
         detections_topic: /detections
-        standoff: 0.5
+        standoff: 0.55
         lateral_offset: 0.0
         yaw_offset: 0.0
         undock_mode: timed_reverse
         timed_reverse_speed: 0.1  # m/s; reverse along base X
-        timed_reverse_duration: 3.0  # s; nominal 0.30 m, not measured
+        timed_reverse_duration: 4.0  # s; nominal 0.40 m, not measured
       trolley:
         tag_id: 7
         tag_frame: tag7
         standoff: 1.1
         lateral_offset: 0.0
+        yaw_offset: 0.0
+      table:
+        tag_id: 20
+        tag_frame: tag20
+        standoff: 0.8
+        lateral_offset: 0.25
         yaw_offset: 0.0
     tag_frame: tag9
     tag_id: 9
@@ -209,7 +215,7 @@ fine_align_server:
     odometry_timeout: 0.5
     controller_frequency: 20.0
     progress_log_interval: 1.0
-    undock_distance: 0.3
+    undock_distance: 0.25
     undock_timeout: 10.0
     # Legacy odometry jump guards are unused by tag-relative undocking.
     undock_position_jump: 0.2
@@ -378,7 +384,7 @@ behavior_server:
       plugin: nav2_behaviors/Wait
     global_frame: odom
     robot_base_frame: base_link
-    transform_tolerance: 0.2
+    transform_tolerance: 5.0
     simulate_ahead_time: 2.0
     max_rotational_vel: 0.5
     min_rotational_vel: 0.1

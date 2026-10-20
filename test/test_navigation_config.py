@@ -41,7 +41,12 @@ def test_navigation_velocity_footprint_and_costmap_settings():
     assert controller["min_vel_theta"] == -1.0
     assert controller["max_vel_theta"] == 1.0
     assert controller["max_speed_theta"] == 1.0
-    assert "PreferForward" not in controller["critics"]
+    if "PreferForward" in controller["critics"]:
+        assert controller["PreferForward.scale"] == 1.0
+        assert controller["PreferForward.penalty"] == 10.0
+        assert controller["PreferForward.theta_scale"] == 1.0
+        assert controller["PreferForward.strafe_x"] == 0.05
+        assert controller["PreferForward.strafe_theta"] == 0.2
 
     local_costmap = configuration["local_costmap"]["local_costmap"]["ros__parameters"]
     global_costmap = configuration["global_costmap"]["global_costmap"]["ros__parameters"]
@@ -112,7 +117,7 @@ def test_recovery_collision_checker_matches_local_costmap_on_humble():
     assert behavior["robot_base_frame"] == local["robot_base_frame"]
     assert behavior["costmap_topic"] == "local_costmap/costmap_raw"
     assert behavior["footprint_topic"] == "local_costmap/published_footprint"
-    assert behavior["transform_tolerance"] == 0.2
+    assert behavior["transform_tolerance"] == local["transform_tolerance"] == 5.0
     assert not {
         "local_frame", "local_costmap_topic", "global_costmap_topic",
         "local_footprint_topic", "global_footprint_topic", "transform_timeout",
@@ -384,12 +389,19 @@ def test_named_dock_configuration():
     configuration = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
     fine_align = configuration["fine_align_server"]["ros__parameters"]
 
-    assert fine_align["docking_profile_names"] == ["trolley", "small_carton_dock", "grey_box_dock"]
+    assert fine_align["docking_profile_names"] == ["trolley", "table", "small_carton_dock", "grey_box_dock"]
     assert fine_align["docking_profiles"]["trolley"] == {
         "tag_id": 7,
         "tag_frame": "tag7",
         "standoff": 1.1,
         "lateral_offset": 0.0,
+        "yaw_offset": 0.0,
+    }
+    assert fine_align["docking_profiles"]["table"] == {
+        "tag_id": 20,
+        "tag_frame": "tag20",
+        "standoff": 0.8,
+        "lateral_offset": 0.25,
         "yaw_offset": 0.0,
     }
     assert fine_align["default_docking_profile"] == "default"
@@ -416,7 +428,7 @@ def test_fine_alignment_docking_and_collision_safety_configuration():
     assert fine_align["retry_delay"] == 1.0
     assert fine_align["controller_frequency"] == 20.0
     assert fine_align["progress_log_interval"] == 1.0
-    assert fine_align["undock_distance"] == 0.3
+    assert fine_align["undock_distance"] == 0.25
     assert fine_align["undock_timeout"] == 10.0
     assert fine_align["undock_translation_speed_min"] == 0.1
     assert fine_align["undock_translation_speed_max"] == 0.1
@@ -600,7 +612,7 @@ def test_box_tag_dock_uses_pickup_camera_and_timed_undock():
     assert box["target_source"] == "box"
     assert "tag_id" not in box and "tag_frame" not in box
     assert box["detections_topic"] == "/detections"
-    assert box["standoff"] == 0.5
+    assert box["standoff"] == 0.55
     assert box["undock_mode"] == "timed_reverse"
     assert box["timed_reverse_speed"] == 0.1
-    assert box["timed_reverse_duration"] == 3.0
+    assert box["timed_reverse_duration"] == 4.0
