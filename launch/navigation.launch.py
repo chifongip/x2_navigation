@@ -2,12 +2,35 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import IfElseSubstitution, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from nav2_common.launch import RewrittenYaml
+from rclpy.expand_topic_name import expand_topic_name
+from rclpy.validate_full_topic_name import validate_full_topic_name
+
+
+def validate_command_topics(context):
+    direct = LaunchConfiguration("direct_alignment").perform(context) == "true"
+    names = ["nav_cmd_topic", "smoothed_nav_cmd_topic", "velocity_topic"]
+    names.append("checked_nav_cmd_topic" if direct else "raw_cmd_topic")
+    resolved = {}
+    namespace = context.launch_configurations.get("ros_namespace", "/") or "/"
+    for name in names:
+        topic = LaunchConfiguration(name).perform(context)
+        if topic.startswith("~"):
+            raise RuntimeError(f"{name} must be shared between nodes, not private: {topic}")
+        full_topic = expand_topic_name(topic, "fine_align_server", namespace)
+        validate_full_topic_name(full_topic)
+        if full_topic in resolved:
+            raise RuntimeError(
+                f"Command topics must be distinct: {name} and {resolved[full_topic]} "
+                f"both resolve to {full_topic}"
+            )
+        resolved[full_topic] = name
+    return []
 
 
 def generate_launch_description():
@@ -21,6 +44,20 @@ def generate_launch_description():
     nav_cmd_topic = LaunchConfiguration("nav_cmd_topic")
     smoothed_nav_cmd_topic = LaunchConfiguration("smoothed_nav_cmd_topic")
     raw_cmd_topic = LaunchConfiguration("raw_cmd_topic")
+    direct_alignment = LaunchConfiguration("direct_alignment")
+    checked_nav_cmd_topic = LaunchConfiguration("checked_nav_cmd_topic")
+    collision_input = IfElseSubstitution(
+        direct_alignment, smoothed_nav_cmd_topic, raw_cmd_topic
+    )
+    collision_output = IfElseSubstitution(
+        direct_alignment, checked_nav_cmd_topic, velocity_topic
+    )
+    arbitration_input = IfElseSubstitution(
+        direct_alignment, checked_nav_cmd_topic, smoothed_nav_cmd_topic
+    )
+    arbitration_output = IfElseSubstitution(
+        direct_alignment, velocity_topic, raw_cmd_topic
+    )
     velocity_zmq_endpoint = LaunchConfiguration("velocity_zmq_endpoint")
     velocity_publish_rate_hz = LaunchConfiguration("velocity_publish_rate_hz")
     velocity_command_timeout_sec = LaunchConfiguration("velocity_command_timeout_sec")
@@ -88,7 +125,21 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "velocity_topic",
                 default_value="/cmd_vel",
-                description="Collision-monitor output consumed by the ZMQ velocity bridge.",
+                description="Final Twist topic consumed by the ZMQ velocity bridge.",
+            ),
+            DeclareLaunchArgument(
+                "direct_alignment",
+                default_value="false",
+                choices=["true", "false"],
+                description=(
+                    "Bypass Collision Monitor for fine-align, undock, and rotation; "
+                    "navigation remains collision checked. Cancel navigation first."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "checked_nav_cmd_topic",
+                default_value="/cmd_vel_nav_checked",
+                description="Collision-checked navigation input in direct-alignment mode.",
             ),
             DeclareLaunchArgument(
                 "nav_cmd_topic",
@@ -169,6 +220,7 @@ def generate_launch_description():
                 ),
                 description="Behavior-tree XML used by NavigateThroughPoses.",
             ),
+            OpaqueFunction(function=validate_command_topics),
             Node(
                 package="x2_navigation",
                 executable="fast_lio_odom_adapter",
@@ -351,8 +403,8 @@ def generate_launch_description():
                 parameters=[
                     configured_params,
                     {
-                        "cmd_vel_in_topic": raw_cmd_topic,
-                        "cmd_vel_out_topic": velocity_topic,
+                        "cmd_vel_in_topic": collision_input,
+                        "cmd_vel_out_topic": collision_output,
                     },
                 ],
             ),
@@ -366,9 +418,12 @@ def generate_launch_description():
                 parameters=[
                     configured_params,
                     {
-                        "nav_cmd_topic": smoothed_nav_cmd_topic,
+                        "nav_cmd_topic": arbitration_input,
                         "nav_raw_cmd_topic": nav_cmd_topic,
-                        "raw_cmd_topic": raw_cmd_topic,
+                        "raw_cmd_topic": arbitration_output,
+                        "bypass_collision_monitor": ParameterValue(
+                            direct_alignment, value_type=bool
+                        ),
                     },
                 ],
             ),

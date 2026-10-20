@@ -285,6 +285,20 @@ class TestNavigationLifecycle(unittest.TestCase):
             )
         }
         self.assertEqual(smooth_publishers, {"velocity_smoother"})
+        self.assertEqual(
+            {endpoint.node_name for endpoint in
+             self.node.get_publishers_info_by_topic("/cmd_vel_raw")},
+            {"fine_align_server"},
+        )
+        self.assertEqual(
+            {endpoint.node_name for endpoint in
+             self.node.get_publishers_info_by_topic("/cmd_vel")},
+            {"collision_monitor"},
+        )
+        self.assertIn("fine_align_server", {
+            endpoint.node_name for endpoint in
+            self.node.get_subscriptions_info_by_topic("/collision_monitor_state")
+        })
 
     def test_raw_lidar_cloud_is_filtered_for_navigation(self):
         cloud = PointCloud2()

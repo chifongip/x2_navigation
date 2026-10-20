@@ -315,6 +315,46 @@ preserving the previous single-input behavior. The navigation launch sets this
 parameter to `nav_cmd_topic` and sets the arbitration input to
 `smoothed_nav_cmd_topic`. Both launch topic arguments may be overridden.
 
+To keep local actions available during global localization loss, start navigation
+with `direct_alignment:=true`. For initial fake-feedback validation, use an
+isolated ROS domain and a test ZMQ endpoint:
+
+```bash
+ROS_DOMAIN_ID=164 ros2 launch x2_navigation navigation.launch.py \
+  direct_alignment:=true rviz:=false \
+  velocity_zmq_endpoint:=tcp://127.0.0.1:18648
+```
+
+In this mode, navigation follows `/cmd_vel_nav` → velocity smoother →
+`/cmd_vel_nav_smoothed` → Collision Monitor → `/cmd_vel_nav_checked` → fine-align
+arbitration → `/cmd_vel` → ZMQ. Fine-align, undock, and rotation commands enter
+arbitration directly and **bypass LiDAR collision stopping**. Only the fine-align
+server publishes the final `/cmd_vel`; `checked_nav_cmd_topic` and `velocity_topic`
+can override these two topics. `raw_cmd_topic` is unused in this mode. Keep the
+navigation, smoothed, checked, and final topics distinct to avoid feedback loops.
+
+Cancel the active Nav2 goal and wait for cancellation to finish before requesting
+`/fine_align`, `/undock`, or `/rotate_in_place`; the navigation-active interlock is
+retained for both `NavigateToPose` and `NavigateThroughPoses`, including accepted
+and canceling goals. Status subscriptions receive retained action status when the
+server joins or restarts. Navigation commands received during a local action are
+discarded, and its navigation cache is cleared at local-action exit; resuming
+navigation requires fresh command inputs. No automatic takeover or switching on
+localization LOST occurs.
+Tag-relative actions still require fresh detections, timestamped robot-to-tag TF,
+and a valid manipulation state, but need neither `/odom` nor map/odom TF.
+The read-only `bypass_collision_monitor` server parameter disables its collision
+state subscription in this mode. Tag-loss handling, cancellation, command expiry,
+and the ZMQ watchdog remain active. The selector and bridge are outside Nav2
+lifecycle management, so local actions can continue when Nav2 nodes deactivate.
+
+The default `direct_alignment:=false` retains the original routing and collision
+stops for all actions. This option does not repair stale localization timestamps.
+Launch rejects duplicate active command topics (including relative/absolute
+aliases) and private command topics before starting nodes.
+Validate direct-mode routing and stop behavior with fake feedback and an isolated
+ROS domain and ZMQ endpoint before hardware motion.
+
 Validate the full command chain in simulation before hardware motion. Compare
 `/cmd_vel_nav`, `/cmd_vel_nav_smoothed`, `/cmd_vel_raw`, and `/cmd_vel` for alternating
 0.1/0.7 rad/s yaw requests, reversals, goal stops, controller input loss, and

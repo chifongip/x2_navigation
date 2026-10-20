@@ -40,7 +40,9 @@ class TestRotation(unittest.TestCase):
             ManipulationState, "/manipulation_state",
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.collisions = self.node.create_publisher(CollisionMonitorState, "/collision_monitor_state", 10)
-        self.nav = self.node.create_publisher(GoalStatusArray, "/navigate_to_pose/_action/status", 10)
+        self.nav = self.node.create_publisher(
+            GoalStatusArray, "/navigate_to_pose/_action/status",
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.client = ActionClient(self.node, RotateInPlace, "/rotate_in_place")
         self.assertTrue(self.client.wait_for_server(timeout_sec=5.0))
         self.publish_state()

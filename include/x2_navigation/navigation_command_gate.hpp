@@ -23,6 +23,13 @@ public:
   explicit NavigationCommandGate(bool monitor_raw = false)
   : monitor_raw_(monitor_raw) {}
 
+  // A local action relinquishes control at rest. Navigation must provide new
+  // input after handover rather than replay commands cached during docking.
+  void reset()
+  {
+    clear();
+  }
+
   void updateRaw(
     const geometry_msgs::msg::Twist & command, TimePoint now, Timeout timeout)
   {

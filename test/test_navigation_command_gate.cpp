@@ -87,4 +87,21 @@ TEST(NavigationCommandGate, NonFiniteInputInvalidatesEitherStream)
     EXPECT_EQ(gate.commandAt(start + 2ms, timeout), geometry_msgs::msg::Twist{});
   }
 }
+
+TEST(NavigationCommandGate, LocalActionHandoverRequiresFreshNavigationInputs)
+{
+  for (const bool monitor_raw : {false, true}) {
+    NavigationCommandGate gate(monitor_raw);
+    gate.updateRaw(movingCommand(), start, timeout);
+    gate.update(movingCommand(), start + 1ms, timeout);
+    gate.reset();
+    EXPECT_EQ(gate.commandAt(start + 2ms, timeout), geometry_msgs::msg::Twist{});
+    if (monitor_raw) {
+      gate.updateRaw(movingCommand(), start + 3ms, timeout);
+      EXPECT_EQ(gate.commandAt(start + 3ms, timeout), geometry_msgs::msg::Twist{});
+    }
+    gate.update(movingCommand(), start + 4ms, timeout);
+    EXPECT_DOUBLE_EQ(gate.commandAt(start + 4ms, timeout).angular.z, 0.7);
+  }
+}
 }  // namespace

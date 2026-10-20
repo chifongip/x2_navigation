@@ -160,7 +160,8 @@ class TestFineAlignServer(unittest.TestCase):
             Twist, "/cmd_vel_raw", self.commands.append, 10
         )
         self.nav_status = self.node.create_publisher(
-            GoalStatusArray, "/navigate_to_pose/_action/status", 10
+            GoalStatusArray, "/navigate_to_pose/_action/status",
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         )
         self.collision_state = self.node.create_publisher(
             CollisionMonitorState, "/collision_monitor_state", 10
