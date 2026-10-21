@@ -41,3 +41,24 @@ def test_launch_preserves_external_ownership_and_chest_obstacles():
         assert f'package="{package}"' not in source
     assert "/aima/hal/sensor/lidar_chest_front/lidar_pointcloud" in source
     assert "/odin1/cloud" not in source
+
+
+@pytest.mark.parametrize("backend,autostart,gated,manager_autostart", [
+    ("odin", "true", True, False),
+    ("odin", "false", False, False),
+    ("fast_lio", "true", False, True),
+    ("fast_lio", "false", False, False),
+])
+def test_lifecycle_startup_selection(backend, autostart, gated, manager_autostart):
+    context = LaunchContext()
+    context.launch_configurations.update({
+        "localization_backend": backend, "autostart": autostart, "use_sim_time": "false",
+    })
+    actions = MODULE.navigation_lifecycle_actions(context, ["map_server", "planner_server"])
+    assert len(actions) == 1 + int(gated)
+    assert actions[0].node_executable == "lifecycle_manager"
+    from launch_ros.utilities import evaluate_parameters
+    parameters = evaluate_parameters(context, actions[0]._Node__parameters)
+    assert parameters[0]["autostart"] is manager_autostart
+    if gated:
+        assert actions[1].node_executable == "nav2_localization_startup_gate.py"

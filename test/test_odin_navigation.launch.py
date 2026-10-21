@@ -8,6 +8,7 @@ import sys
 
 import rclpy
 from rcl_interfaces.srv import GetParameters
+from lifecycle_msgs.srv import GetState
 from launch.actions import ExecuteProcess
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
@@ -26,13 +27,46 @@ def generate_test_description():
         config_file = config.name
     description = BASE.navigation_test_description("odin", root_tf=False, odin_params_file=config_file)
     description.add_action(ExecuteProcess(
-        cmd=[sys.executable, str(Path(__file__).with_name("odin_navigation_inputs.py"))],
+        cmd=[sys.executable, str(Path(__file__).with_name("odin_navigation_inputs.py")),
+             "--ros-args", "-p", "wait_for_corrections:=true"],
         output="screen",
     ))
     return description
 
 
 class TestOdinNavigation(BASE.TestNavigationLifecycle):
+    def test_00_waits_for_relocalization_before_configuring_nav2(self, proc_output):
+        clients = [self.node.create_client(GetState, f"/{name}/get_state")
+                   for name in ("map_server", "planner_server", "controller_server")]
+        try:
+            for client in clients:
+                self.assertTrue(client.wait_for_service(timeout_sec=8))
+                future = client.call_async(GetState.Request())
+                rclpy.spin_until_future_complete(self.node, future, timeout_sec=3)
+                self.assertTrue(future.done())
+                self.assertEqual(future.result().current_state.label, "unconfigured")
+            # Hold localization unavailable long enough to expose premature activation.
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                rclpy.spin_once(self.node, timeout_sec=0.05)
+            for client in clients:
+                future = client.call_async(GetState.Request())
+                rclpy.spin_until_future_complete(self.node, future, timeout_sec=3)
+                self.assertEqual(future.result().current_state.label, "unconfigured")
+            enable = self.node.create_publisher(Bool, "/test/enable_odin_corrections", 10)
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                enable.publish(Bool(data=True))
+                rclpy.spin_once(self.node, timeout_sec=0.05)
+            self.wait_for_active_lifecycle_node("planner_server")
+            self.wait_for_active_lifecycle_node("controller_server")
+            output = b"".join(event.text for event in proc_output)
+            self.assertNotIn(b'Timed out waiting for transform from base_link to map', output)
+            self.node.destroy_publisher(enable)
+        finally:
+            for client in clients:
+                self.node.destroy_client(client)
+
     def test_adapter_supplies_odometry_and_readiness(self):
         odometry = []
         ready = []

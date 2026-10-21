@@ -54,13 +54,34 @@ def backend_actions(context):
     )]
 
 
+def navigation_lifecycle_actions(context, lifecycle_nodes):
+    odin = LaunchConfiguration("localization_backend").perform(context) == "odin"
+    autostart = LaunchConfiguration("autostart").perform(context) == "true"
+    use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
+    actions = [Node(
+        package="nav2_lifecycle_manager", executable="lifecycle_manager",
+        name="lifecycle_manager_navigation", output="screen",
+        parameters=[{
+            "use_sim_time": use_sim_time,
+            "autostart": autostart and not odin,
+            "node_names": lifecycle_nodes,
+        }],
+    )]
+    if odin and autostart:
+        actions.append(Node(
+            package="x2_navigation", executable="nav2_localization_startup_gate.py",
+            name="nav2_localization_startup_gate", output="screen",
+            parameters=[{"use_sim_time": use_sim_time}],
+        ))
+    return actions
+
+
 def generate_launch_description():
     package_path = Path(get_package_share_directory("x2_navigation"))
     nav2_bt_navigator_path = Path(get_package_share_directory("nav2_bt_navigator"))
     map_yaml = LaunchConfiguration("map")
     params_file = LaunchConfiguration("params_file")
     use_sim_time = LaunchConfiguration("use_sim_time")
-    autostart = LaunchConfiguration("autostart")
     velocity_topic = LaunchConfiguration("velocity_topic")
     nav_cmd_topic = LaunchConfiguration("nav_cmd_topic")
     smoothed_nav_cmd_topic = LaunchConfiguration("smoothed_nav_cmd_topic")
@@ -457,18 +478,9 @@ def generate_launch_description():
                     },
                 ],
             ),
-            Node(
-                package="nav2_lifecycle_manager",
-                executable="lifecycle_manager",
-                name="lifecycle_manager_navigation",
-                output="screen",
-                parameters=[
-                    {
-                        "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
-                        "autostart": ParameterValue(autostart, value_type=bool),
-                        "node_names": lifecycle_nodes,
-                    }
-                ],
+            OpaqueFunction(
+                function=navigation_lifecycle_actions,
+                kwargs={"lifecycle_nodes": lifecycle_nodes},
             ),
             Node(
                 package="rviz2",

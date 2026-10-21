@@ -136,6 +136,30 @@ requires advancing valid local input, timestamp-valid robot TF, a fresh valid
 native correction, a velocity baseline, and `map_alignment_confirmed: true`.
 That flag defaults false; identity alignment is never silently accepted.
 
+With `localization_backend:=odin autostart:=true`, navigation starts its processes
+but leaves the managed Nav2 nodes unconfigured until the startup gate observes
+sustained readiness. The lifecycle manager itself has immediate autostart disabled.
+The gate requires true readiness for 0.5 seconds, heartbeats no older than 0.25
+seconds, and a complete `map -> odom -> base_link` chain in its own TF buffer
+with transform ages between -0.05 and 1.0 seconds. It also waits for
+`/lifecycle_manager_navigation/manage_nodes`, then sends exactly one `STARTUP`
+request. Waiting is indefinite, with informational messages at most every five
+seconds. Successful lifecycle startup ends the gate process normally. A failed
+request exits with an error and is not retried automatically because some nodes
+may already have transitioned; inspect their states before a manual recovery.
+
+The gate's private parameters are `ready_hold_sec`, `readiness_timeout_sec`,
+`tf_max_age_sec`, `future_tolerance_sec`, `readiness_topic`, `manager_service`,
+`map_frame`, `odom_frame`, and `base_frame`. Standard frame/topic defaults match
+the Odin adapter defaults. No extra launch flags are required. `autostart:=false`
+retains manual lifecycle control without a gate; FAST-LIO startup is unchanged.
+This gate controls initial Nav2 startup only. A loss after activation leaves
+Nav2 running, with motion blocked by the velocity bridge as described below.
+Localization can change after a startup request is submitted; the velocity
+bridge remains the authority for suppressing transport commands during that loss.
+Operator-panel and cloud-preprocessor startup TF diagnostics are independent
+and are not suppressed by this gate.
+
 Defaults: local timeout 0.25 s, correction timeout 1.0 s, future tolerance 0.05 s.
 Both measurement time and steady-clock progress are checked. Repeated packets
 do not keep old corrections alive. Map TF retains the correction's measurement
@@ -156,6 +180,44 @@ Recovery requires a newly received command. No localization-loss fallback to
 FAST-LIO is automatic. The driver exposes no independent tracking-confidence or
 loss flag; fresh correction packets are evidence of correction availability,
 not proof of localization accuracy. Inactive Nav2 is preferred for initial checks.
+
+## Deploying the readiness-gated startup
+
+Deploy the changed `x2_navigation` launch file, gate executable, CMake install/test
+registration, tests, and documentation to the container source checkout. Preserve
+its existing `config/` files and map artifacts. Build inside `robojudo-plus`:
+
+```bash
+cd /home/agi/workspace/x2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+(unset FASTRTPS_DEFAULT_PROFILES_FILE; colcon build --symlink-install --packages-select x2_navigation)
+source install/setup.bash
+```
+
+At a coordinated restart, use the existing startup script and Odin profile with
+`NAVIGATION_AUTOSTART=true`. No script changes are required. Preview first:
+
+```bash
+NAVIGATION_AUTOSTART=true ENABLE_VELOCITY_BRIDGE=false \
+  bash /home/agi/workspace/run_ros_stack.sh --localization true --navigation true --dry-run
+```
+
+If the isolated driver already runs, use `--localization false`; if shared state
+already runs, also set `START_STATE_BRINGUP=false`. Remove `--dry-run` only after
+coordinating process ownership. Keep command forwarding disabled for this passive
+validation. Before relocalization, check that `/planner_server` is unconfigured;
+after the gate reports startup success, check that it is active:
+
+```bash
+ros2 lifecycle get /planner_server
+ros2 topic echo /odin1/localization_ready --once
+```
+
+Confirm the global costmap no longer prints the missing-map timeout during this
+initial wait. Later localization-loss diagnostics remain enabled. Roll back this
+feature by restoring the previous package revision and rebuilding at another
+coordinated restart, preserving all runtime configuration files.
 
 ## Controlled startup and validation — not executed on the live robot
 

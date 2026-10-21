@@ -126,6 +126,7 @@ install(TARGETS
   payload_cloud_filter
   DESTINATION lib/${PROJECT_NAME}
 )
+install(PROGRAMS scripts/nav2_localization_startup_gate.py DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch map rviz DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY docs DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
@@ -140,6 +141,8 @@ if(BUILD_TESTING)
   target_include_directories(test_odin_transform PRIVATE include)
   target_link_libraries(test_odin_transform Eigen3::Eigen)
   ament_target_dependencies(test_odin_transform geometry_msgs)
+  ament_add_pytest_test(test_nav2_startup_hold test/test_nav2_startup_hold.py)
+  add_launch_test(test/test_nav2_startup_gate.launch.py TIMEOUT 50)
   ament_add_pytest_test(test_localization_backend test/test_localization_backend.py)
   ament_add_pytest_test(test_odin_driver_launch test/test_odin_driver_launch.py)
   add_launch_test(test/test_odin_localization.launch.py TIMEOUT 90)

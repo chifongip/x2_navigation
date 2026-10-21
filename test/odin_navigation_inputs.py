@@ -9,6 +9,7 @@ from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.duration import Duration
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
 from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -25,6 +26,15 @@ def main():
     buffer = Buffer()
     listener = TransformListener(buffer, node)
     count = 0
+    corrections_enabled = not node.declare_parameter("wait_for_corrections", False).value
+
+    def enable_corrections(message):
+        nonlocal corrections_enabled
+        corrections_enabled = message.data
+
+    enable_sub = node.create_subscription(
+        Bool, "/test/enable_odin_corrections", enable_corrections, 10)
+
 
     def publish():
         nonlocal count
@@ -49,7 +59,7 @@ def main():
         odom.pose.pose.orientation = mount.transform.rotation
         local.publish(odom)
         count += 1
-        if count % 10 == 0:
+        if corrections_enabled and count % 10 == 0:
             tf = TransformStamped()
             tf.header = odom.header
             tf.child_frame_id = "map"
